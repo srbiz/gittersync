@@ -21,6 +21,21 @@ Try GitterSync in action with our [**Kanban Board Demo**](https://srbiz.github.i
 
 > **Quick start:** Open the demo, enter a GitHub PAT with `repo` scope, and start creating tasks. The default demo repo is ready to use!
 
+### 🔑 GitHub Token Guidance
+
+To use the demo or the library, you need a GitHub Personal Access Token (PAT). You can use either:
+
+1.  **Classic Token (Recommended for Demo):**
+    *   Go to [Settings > Developer settings > Personal access tokens > Tokens (classic)](https://github.com/settings/tokens).
+    *   Generate a new token with the **`repo`** scope.
+    *   This is the simplest way to get started.
+
+2.  **Fine-grained Token:**
+    *   Go to [Settings > Developer settings > Personal access tokens > Fine-grained tokens](https://github.com/settings/personal-access-tokens/new).
+    *   Select the repository you want to use as a database.
+    *   Grant **Read and write** access to **"Contents"** and **"Metadata"**.
+    *   This is more secure but requires manual repo selection.
+
 ## How It Works
 
 GitterSync stores your app data in a GitHub repository using a structured file format. Each collection (e.g. `users`, `posts`) gets its own JSON file, and incremental changes are tracked through changelog files. Sync uses the GitHub Compare Commits API to only download what changed since the last sync.
