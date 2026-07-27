@@ -189,7 +189,6 @@ export async function moveTaskToColumn(taskId: string, fromColumn: ColumnId, toC
         ...doc,
         data: updatedData,
         _fields: updatedFields,
-        columnId: toColumn, // stored in data too
         deleted_at: null,
         deleted_by: null,
     };
