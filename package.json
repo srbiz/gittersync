@@ -1,6 +1,6 @@
 {
   "name": "gittersync",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "GitHub as a free database backend — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,11 +11,11 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/srbon/gittersync.git"
+    "url": "git+https://github.com/srbiz/gittersync.git"
   },
-  "homepage": "https://github.com/srbon/gittersync#readme",
+  "homepage": "https://github.com/srbiz/gittersync#readme",
   "bugs": {
-    "url": "https://github.com/srbon/gittersync/issues"
+    "url": "https://github.com/srbiz/gittersync/issues"
   },
   "scripts": {
     "build": "tsc",
