@@ -148,6 +148,8 @@ export interface FileRef {
 export interface SyncStatus {
     /** Whether a sync operation is currently in progress */
     isSyncing: boolean;
+    /** Whether the browser reports an active network connection */
+    isOnline: boolean;
     /** Current sync cursor — null if never synced */
     cursor: SyncCursor | null;
     /** This device's identifier */

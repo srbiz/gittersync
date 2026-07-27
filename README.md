@@ -117,6 +117,23 @@ sync.startAutoSync(2 * 60 * 1000) // every 2 minutes
 sync.stopAutoSync()
 ```
 
+### Online/Offline Detection
+
+GitterSync automatically detects browser connectivity and handles offline scenarios:
+
+- **Skip sync when offline** — `startAutoSync()` checks `navigator.onLine` before each sync cycle and skips if the browser is offline, avoiding wasted network errors
+- **Auto-retry on reconnect** — when the browser fires the `online` event, GitterSync immediately triggers a sync so changes are pushed as soon as connectivity returns
+- **Visibility** — the `isOnline` property and `SyncStatus.isOnline` field let your UI reflect the current connectivity state
+
+```typescript
+// Check connectivity state
+console.log(sync.isOnline) // true | false
+
+// In non-browser environments (Node.js), isOnline defaults to true
+```
+
+> **Note:** Online/offline detection uses the browser's `navigator.onLine` property and `online`/`offline` events. In non-browser environments (Node.js, SSR), `isOnline` defaults to `true` since there's no standard connectivity API.
+
 ## Binary File Sync
 
 ```typescript
@@ -152,13 +169,19 @@ GitterSync uses **field-level Last-Write-Wins (LWW)**:
 const status = sync.getStatus()
 // {
 //   isSyncing: boolean
+//   isOnline: boolean        // current connectivity state
 //   isInitialized: boolean
 //   lastSyncAt: string | null
 //   pendingChanges: number
+//   deviceId: string
+//   cursor: SyncCursor | null
+//   repoSizeKb: number | null
+//   rateLimitRemaining: number | null
 // }
 
 const fullStatus = await sync.getFullStatus()
-// includes: repoSizeKb, rateLimitRemaining, rateLimitReset
+// Same as getStatus(), plus repo size and rate limit info
+// fetched asynchronously from GitHub
 ```
 
 ## API Reference
@@ -175,10 +198,11 @@ const fullStatus = await sync.getFullStatus()
 | `compact()` | Merge changelogs into collections, purge expired deletes |
 | `uploadFile(name, blob)` | Upload a binary file |
 | `downloadFile(path)` | Download a binary file |
-| `startAutoSync(intervalMs?)` | Start periodic sync |
-| `stopAutoSync()` | Stop periodic sync |
-| `getStatus()` | Get sync status |
+| `startAutoSync(intervalMs?)` | Start periodic sync (skips when offline, auto-retries on reconnect) |
+| `stopAutoSync()` | Stop periodic sync and remove online/offline listeners |
+| `getStatus()` | Get sync status (includes `isOnline`) |
 | `getFullStatus()` | Get detailed sync status with repo/rate-limit info |
+| `isOnline` | Read-only property — current connectivity state |
 
 ### Merge Algorithms
 
@@ -225,15 +249,37 @@ npm install
 # Type-check
 npm run lint
 
-# Run tests
+# Run unit tests (135 tests, excludes integration)
 npm test
+
+# Run integration tests (requires GITTERSYNC_TEST_TOKEN)
+npm run test:integration
 
 # Build
 npm run build
 
 # Watch tests
 npm run test:watch
+
+# Check formatting
+npm run format:check
 ```
+
+### Integration Tests
+
+Integration tests exercise the real GitHub API and require a GitHub Personal Access Token with `repo` and `delete_repo` scopes:
+
+```bash
+# PowerShell
+$env:GITTERSYNC_TEST_TOKEN = "ghp_your_token_here"
+npm run test:integration
+
+# bash/zsh
+export GITTERSYNC_TEST_TOKEN="ghp_your_token_here"
+npm run test:integration
+```
+
+See [`tests/integration/README.md`](tests/integration/README.md) for details.
 
 ## Architecture Plan
 

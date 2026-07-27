@@ -61,6 +61,9 @@ export class GitHubSyncService {
     private isSyncing = false;
     private syncTimer: ReturnType<typeof setTimeout> | null = null;
     private token: string | null = null;
+    private online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    private boundOnlineHandler: (() => void) | null = null;
+    private boundOfflineHandler: (() => void) | null = null;
 
     constructor(config: GitHubSyncConfig) {
         this.config = {
@@ -509,6 +512,9 @@ export class GitHubSyncService {
         this.stopAutoSync();
 
         const doSync = async () => {
+            if (!this.online) {
+                return; // Skip sync cycle when offline
+            }
             try {
                 await this.sync();
             } catch (error) {
@@ -516,7 +522,23 @@ export class GitHubSyncService {
             }
         };
 
-        // Initial sync
+        // Register online/offline event listeners
+        if (typeof window !== 'undefined') {
+            this.boundOnlineHandler = () => {
+                this.online = true;
+                this.emitStatus();
+                // Trigger an immediate sync when connectivity returns
+                doSync();
+            };
+            this.boundOfflineHandler = () => {
+                this.online = false;
+                this.emitStatus();
+            };
+            window.addEventListener('online', this.boundOnlineHandler);
+            window.addEventListener('offline', this.boundOfflineHandler);
+        }
+
+        // Initial sync (if online)
         doSync();
 
         // Set up interval
@@ -531,6 +553,26 @@ export class GitHubSyncService {
             clearInterval(this.syncTimer);
             this.syncTimer = null;
         }
+
+        // Remove online/offline event listeners
+        if (typeof window !== 'undefined') {
+            if (this.boundOnlineHandler) {
+                window.removeEventListener('online', this.boundOnlineHandler);
+                this.boundOnlineHandler = null;
+            }
+            if (this.boundOfflineHandler) {
+                window.removeEventListener('offline', this.boundOfflineHandler);
+                this.boundOfflineHandler = null;
+            }
+        }
+    }
+
+    /**
+     * Whether the browser reports an active network connection.
+     * Defaults to `true` in non-browser environments.
+     */
+    get isOnline(): boolean {
+        return this.online;
     }
 
     // ─── Status ─────────────────────────────────────────────────────────
@@ -541,6 +583,7 @@ export class GitHubSyncService {
     getStatus(): SyncStatus {
         return {
             isSyncing: this.isSyncing,
+            isOnline: this.online,
             cursor: null, // Will be populated async
             deviceId: this.localDb.getDeviceId(),
             pendingChanges: 0, // Will be populated async
@@ -565,6 +608,7 @@ export class GitHubSyncService {
 
         return {
             isSyncing: this.isSyncing,
+            isOnline: this.online,
             cursor,
             deviceId: this.localDb.getDeviceId(),
             pendingChanges,
