@@ -130,19 +130,16 @@ export class LocalDB {
         if (this.registeredCollections.has(name)) return;
 
         const tableName = this.getTableName(name);
+        const tableExists = this.collectionsDb.tables.some(t => t.name === tableName);
 
-        try {
-            // Try to access the table — if it exists, we're good
-            this.collectionsDb.table(tableName);
-        } catch {
-            // Table doesn't exist yet — create it by upgrading the schema
-            const currentVersion = this.collectionsDb.verno;
-            const newVersion = currentVersion + 1;
+        if (!tableExists) {
+            const schema: Record<string, string> = {};
+            for (const existing of this.registeredCollections) {
+                schema[this.getTableName(existing)] = 'id, updated_at, deleted_at';
+            }
+            schema[tableName] = 'id, updated_at, deleted_at';
 
-            // Create a new version with the additional table
-            this.collectionsDb.version(newVersion).stores({
-                [tableName]: 'id, updated_at, deleted_at',
-            });
+            this.collectionsDb.version((this.collectionsDb.verno || 0) + 1).stores(schema);
         }
 
         this.registeredCollections.add(name);

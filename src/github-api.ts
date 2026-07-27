@@ -59,6 +59,19 @@ export class GitHubApiAdapter {
     async init(token: string): Promise<boolean> {
         this.octokit = new Octokit({ auth: token });
 
+        this.octokit.hook.after('request', async (response) => {
+            const headers = response.headers as Record<string, string>;
+            const remaining = headers['x-ratelimit-remaining'];
+            const resetAt = headers['x-ratelimit-reset'];
+            if (remaining) this.rateLimitRemaining = parseInt(remaining, 10);
+            if (resetAt) this.rateLimitResetAt = new Date(parseInt(resetAt, 10) * 1000);
+            if (this.rateLimitRemaining !== null && this.rateLimitRemaining < 100) {
+                console.warn(
+                    `[GitterSync] Rate limit low: ${this.rateLimitRemaining} remaining. Resets at ${this.rateLimitResetAt?.toISOString()}`,
+                );
+            }
+        });
+
         try {
             await this.octokit.repos.get({
                 owner: this.config.owner,
@@ -371,28 +384,6 @@ export class GitHubApiAdapter {
 
     /** Time when rate limit resets */
     rateLimitResetAt: Date | null = null;
-
-    private checkRateLimit(headers?: Record<string, string>): void {
-        if (!headers) return;
-
-        const remaining = headers['x-ratelimit-remaining'];
-        const resetAt = headers['x-ratelimit-reset'];
-
-        if (remaining) {
-            this.rateLimitRemaining = parseInt(remaining, 10);
-        }
-        if (resetAt) {
-            this.rateLimitResetAt = new Date(parseInt(resetAt, 10) * 1000);
-        }
-
-        // Warn if running low
-        if (this.rateLimitRemaining !== null && this.rateLimitRemaining < 100) {
-            console.warn(
-                `[GitterSync] Rate limit low: ${this.rateLimitRemaining} remaining. ` +
-                    `Resets at ${this.rateLimitResetAt?.toISOString()}`,
-            );
-        }
-    }
 
     // ─── Utility ─────────────────────────────────────────────────────────
 

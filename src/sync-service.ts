@@ -61,7 +61,7 @@ export class GitHubSyncService {
     private isSyncing = false;
     private syncTimer: ReturnType<typeof setTimeout> | null = null;
     private token: string | null = null;
-    private online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    private online = typeof navigator !== 'undefined' && navigator.onLine;
     private boundOnlineHandler: (() => void) | null = null;
     private boundOfflineHandler: (() => void) | null = null;
 
@@ -324,6 +324,7 @@ export class GitHubSyncService {
      */
     async sync(): Promise<PullResult> {
         if (this.isSyncing) {
+            console.warn('[GitterSync] Sync skipped — already in progress');
             return { type: 'none' };
         }
 

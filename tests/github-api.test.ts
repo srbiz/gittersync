@@ -20,6 +20,9 @@ const mockReposListCommits = vi.fn();
 
 vi.mock('@octokit/rest', () => ({
     Octokit: vi.fn().mockImplementation(() => ({
+        hook: {
+            after: vi.fn(),
+        },
         repos: {
             get: mockReposGet,
             getContent: mockReposGetContent,
