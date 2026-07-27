@@ -68,8 +68,13 @@ export async function initializeSync(config: AppConfig, token: string): Promise<
     // Initialize
     await syncService.init(token);
 
-    // Register collections
-    await syncService.registerCollections(['tasks', 'columns', 'metadata']);
+    // Register per-column collections
+    await syncService.registerCollections([
+        'column_todo',
+        'column_in-progress',
+        'column_review',
+        'column_done',
+    ]);
 
     // Try to register demo data if it's the default repo
     if (config.owner === DEFAULT_REPO_OWNER && config.repo === DEFAULT_REPO_NAME) {
