@@ -2,6 +2,25 @@
 
 **GitHub as a free database backend** — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution.
 
+[![Live Demo](https://img.shields.io/badge/demo-live-00d4aa?style=for-the-badge)](https://srbiz.github.io/gittersync/)
+[![npm version](https://img.shields.io/npm/v/gittersync?color=00d4aa&label=npm)](https://www.npmjs.com/package/gittersync)
+[![CI](https://img.shields.io/github/actions/workflow/status/srbiz/gittersync/ci.yml?branch=main)](https://github.com/srbiz/gittersync/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+## 🎮 Live Demo
+
+Try GitterSync in action with our [**Kanban Board Demo**](https://srbiz.github.io/gittersync/) — a fully functional project management app that showcases every feature of the library:
+
+- ✅ **Task CRUD** with offline-first sync
+- ✅ **Drag & drop** between columns (field-level conflict resolution)
+- ✅ **File attachments** with files-first ordering
+- ✅ **Auto-sync** with configurable interval
+- ✅ **Online/offline detection** with auto-retry on reconnect
+- ✅ **Real-time status dashboard** (sync cursor, pending changes, rate limit)
+- ✅ **Token encryption** with AES-256-GCM passphrase protection
+
+> **Quick start:** Open the demo, enter a GitHub PAT with `repo` scope, and start creating tasks. The default demo repo is ready to use!
+
 ## How It Works
 
 GitterSync stores your app data in a GitHub repository using a structured file format. Each collection (e.g. `users`, `posts`) gets its own JSON file, and incremental changes are tracked through changelog files. Sync uses the GitHub Compare Commits API to only download what changed since the last sync.
@@ -263,6 +282,21 @@ npm run test:watch
 
 # Check formatting
 npm run format:check
+```
+
+### Demo Application
+
+A full-featured [Kanban Board demo](https://srbiz.github.io/gittersync/) is included in the `demo/` directory:
+
+```bash
+# Install demo dependencies
+cd demo && npm install
+
+# Start dev server
+npm run dev
+
+# Build for production
+npm run build
 ```
 
 ### Integration Tests
