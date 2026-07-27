@@ -1,0 +1,30 @@
+# Source files
+src/
+tests/
+
+# Configuration
+tsconfig.json
+vitest.config.ts
+eslint.config.js
+.prettierrc
+
+# Development
+plans/
+.github/
+.roo/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+
+# Misc
+*.md
+!README.md
+LICENSE

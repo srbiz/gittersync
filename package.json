@@ -1,0 +1,64 @@
+{
+  "name": "gittersync",
+  "version": "1.0.0",
+  "description": "GitHub as a free database backend — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/srbon/gittersync.git"
+  },
+  "homepage": "https://github.com/srbon/gittersync#readme",
+  "bugs": {
+    "url": "https://github.com/srbon/gittersync/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test && npm run lint"
+  },
+  "keywords": [
+    "github",
+    "sync",
+    "offline-first",
+    "indexeddb",
+    "dexie",
+    "database",
+    "crdt",
+    "conflict-resolution",
+    "local-first"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "dexie": "^4.4.4"
+  },
+  "devDependencies": {
+    "@babel/core": "^8.0.1",
+    "@babel/eslint-parser": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-typescript": "^8.0.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "fake-indexeddb": "^6.2.5",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2",
+    "vitest": "^3.2.7"
+  }
+}

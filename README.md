@@ -1,0 +1,250 @@
+# GitterSync
+
+**GitHub as a free database backend** — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution.
+
+## How It Works
+
+GitterSync stores your app data in a GitHub repository using a structured file format. Each collection (e.g. `users`, `posts`) gets its own JSON file, and incremental changes are tracked through changelog files. Sync uses the GitHub Compare Commits API to only download what changed since the last sync.
+
+### Key Architecture Decisions
+
+- **Per-collection files** — `collections/users.json`, `collections/posts.json` — avoids the single-file bottleneck
+- **Incremental changelog sync** — only transmit what changed; uses GitHub's Compare Commits API
+- **Field-level LWW (Last-Write-Wins)** — each field has its own `updatedAt` timestamp; concurrent edits to different fields are preserved
+- **Sync cursor (commit SHA)** — instead of timestamp-based tracking; enables efficient incremental pull
+- **Files-first ordering** — binary uploads happen before metadata updates to prevent dangling references
+- **Compaction** — changelog entries are merged into collection files when threshold is exceeded
+
+### Data Format
+
+Each document tracks field-level metadata for conflict resolution:
+
+```json
+{
+  "id": "user-123",
+  "data": { "name": "Alice", "email": "alice@example.com" },
+  "_fields": {
+    "name": { "updatedAt": "2026-07-27T10:00:00Z", "device": "deviceA" },
+    "email": { "updatedAt": "2026-07-27T09:00:00Z", "device": "deviceB" }
+  },
+  "updated_at": "2026-07-27T10:00:00Z",
+  "created_at": "2026-07-01T00:00:00Z",
+  "deleted_at": null,
+  "deleted_by": null
+}
+```
+
+## Installation
+
+```bash
+npm install gittersync
+```
+
+### Peer Requirements
+
+This library requires a browser environment (or browser-like) for:
+- **IndexedDB** — via Dexie.js for local storage
+- **Web Crypto API** — for AES-256-GCM token encryption
+- **localStorage** — for encrypted token storage
+
+## Quick Start
+
+```typescript
+import { GitHubSyncService, storeToken, retrieveToken } from 'gittersync'
+
+// 1. Create a sync service
+const sync = new GitHubSyncService({
+  owner: 'your-username',
+  repo: 'your-data-repo',
+  branch: 'main',
+  compactionThreshold: 20,   // compact after 20 changelog entries
+  deleteRetentionMs: 30 * 24 * 60 * 60 * 1000,  // purge soft-deletes after 30 days
+})
+
+// 2. Initialize with a GitHub Personal Access Token
+const token = 'ghp_xxxxxxxxxxxx'
+await sync.init(token)
+
+// 3. Register your collections
+await sync.registerCollections(['users', 'posts'])
+
+// 4. Pull remote data into local IndexedDB
+const result = await sync.pull()
+console.log(result.type) // 'full' | 'incremental' | 'none'
+
+// 5. Work with local data via the LocalDB API
+// (Access the localDb instance from the service)
+
+// 6. Push local changes to GitHub
+await sync.push()
+
+// 7. Full sync (pull + push with conflict retry)
+await sync.sync()
+```
+
+## Token Security
+
+GitterSync provides AES-256-GCM encryption for storing GitHub tokens in `localStorage`:
+
+```typescript
+import { storeToken, retrieveToken, hasStoredToken, clearStoredToken } from 'gittersync'
+
+// Encrypt and store the token with a user-provided passphrase
+await storeToken('ghp_xxxxxxxxxxxx', 'user-passphrase')
+
+// Retrieve and decrypt
+const token = await retrieveToken('user-passphrase')
+
+// Check if a token is stored
+if (hasStoredToken()) { /* ... */ }
+
+// Remove the stored token
+clearStoredToken()
+```
+
+> **Note:** For production apps, GitHub OAuth is recommended over PAT storage. The encryption utility is a fallback for scenarios where OAuth isn't feasible.
+
+## Auto-Sync
+
+```typescript
+// Start periodic sync every 5 minutes (default)
+sync.startAutoSync()
+
+// Custom interval
+sync.startAutoSync(2 * 60 * 1000) // every 2 minutes
+
+// Stop auto-sync
+sync.stopAutoSync()
+```
+
+## Binary File Sync
+
+```typescript
+// Upload a file (creates files/{filename} in the repo)
+const fileRef = await sync.uploadFile('avatar.png', blob)
+
+// Download a file
+const blob = await sync.downloadFile('files/avatar.png')
+```
+
+## Compaction
+
+Changelog entries accumulate over time. Compaction merges them into the main collection files and purges expired soft-deletes:
+
+```typescript
+await sync.compact()
+```
+
+Compaction is also automatically triggered during `push()` when pending changelog entries exceed the configured `compactionThreshold`.
+
+## Conflict Resolution
+
+GitterSync uses **field-level Last-Write-Wins (LWW)**:
+
+1. When two devices edit different fields of the same document, both changes are preserved
+2. When two devices edit the same field, the one with the later timestamp wins
+3. On equal timestamps, the remote version takes priority
+4. Soft-deletes use a separate `deleted_at` field — a newer edit overrides an older delete
+
+## Sync Status
+
+```typescript
+const status = sync.getStatus()
+// {
+//   isSyncing: boolean
+//   isInitialized: boolean
+//   lastSyncAt: string | null
+//   pendingChanges: number
+// }
+
+const fullStatus = await sync.getFullStatus()
+// includes: repoSizeKb, rateLimitRemaining, rateLimitReset
+```
+
+## API Reference
+
+### `GitHubSyncService`
+
+| Method | Description |
+|--------|-------------|
+| `init(token)` | Initialize with GitHub token |
+| `registerCollections(names)` | Register collection names |
+| `pull()` | Pull remote changes (full or incremental) |
+| `push()` | Push local changelog entries to GitHub |
+| `sync()` | Pull then push with conflict retry |
+| `compact()` | Merge changelogs into collections, purge expired deletes |
+| `uploadFile(name, blob)` | Upload a binary file |
+| `downloadFile(path)` | Download a binary file |
+| `startAutoSync(intervalMs?)` | Start periodic sync |
+| `stopAutoSync()` | Stop periodic sync |
+| `getStatus()` | Get sync status |
+| `getFullStatus()` | Get detailed sync status with repo/rate-limit info |
+
+### Merge Algorithms
+
+| Function | Description |
+|----------|-------------|
+| `mergeDocument(local, remote)` | Field-level LWW merge of two documents |
+| `mergeCollection(local, remote)` | Merge two collection files |
+| `applyChangelogToCollection(collection, entries)` | Apply changelog entries to a collection |
+| `createDocument(data, deviceId)` | Create a new SyncedDocument with field metadata |
+| `createChangelogEntry(op, docId, fields, deviceId)` | Create a changelog entry |
+| `getExpiredDeletes(collection, maxAgeMs)` | Find IDs of expired soft-deletes |
+
+### Error Classes
+
+| Class | Description |
+|-------|-------------|
+| `ConflictError` | GitHub 409 conflict (concurrent pushes) |
+| `RateLimitError` | GitHub API rate limit exceeded |
+| `AuthError` | Authentication failure (401/403) |
+| `ValidationError` | Invalid input parameters |
+
+## Repository Structure
+
+When using GitterSync, your GitHub repo will look like:
+
+```
+repo/
+├── meta.json                          # Global metadata (collections, schema version)
+├── collections/
+│   ├── users.json                     # Per-collection document store
+│   └── posts.json
+├── changelogs/
+│   └── 2026-07-27T10-00-00_deviceA.json   # Incremental change entries
+└── files/
+    └── avatar.png                     # Binary file attachments
+```
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Type-check
+npm run lint
+
+# Run tests
+npm test
+
+# Build
+npm run build
+
+# Watch tests
+npm run test:watch
+```
+
+## Architecture Plan
+
+See [`plans/github-database-sync-plan-v2.md`](plans/github-database-sync-plan-v2.md) for the full architectural design document covering:
+- Sync algorithms and data flow
+- GitHub API usage patterns
+- Offline-first conflict resolution strategy
+- Compaction and repo size management
+- Security model (OAuth + encrypted PAT fallback)
+- Edge cases and error handling
+
+## License
+
+MIT
