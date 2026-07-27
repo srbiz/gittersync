@@ -130,7 +130,7 @@ export class LocalDB {
         if (this.registeredCollections.has(name)) return;
 
         const tableName = this.getTableName(name);
-        const tableExists = this.collectionsDb.tables.some(t => t.name === tableName);
+        const tableExists = this.collectionsDb.tables.some((t) => t.name === tableName);
 
         if (!tableExists) {
             const schema: Record<string, string> = {};

@@ -1,6 +1,6 @@
 {
   "name": "gittersync",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "GitHub as a free database backend — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -74,7 +74,9 @@ export function mergeDocument<T = Record<string, unknown>>(
         created_at: localDoc.created_at, // created_at never changes
         deleted_at: deletedAt,
         deleted_by: deletedAt
-            ? (deletedAt === localDoc.deleted_at ? localDoc.deleted_by : remoteDoc.deleted_by)
+            ? deletedAt === localDoc.deleted_at
+                ? localDoc.deleted_by
+                : remoteDoc.deleted_by
             : null,
     };
 }
