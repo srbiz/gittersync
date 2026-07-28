@@ -5,6 +5,7 @@
 import { getState, subscribe, showMessage } from '../state';
 import { renderColumn } from '../components/column';
 import { renderSyncBar } from '../components/sync-bar';
+import { showHelpDialog } from '../components/help-dialog';
 
 export function renderBoard(container: HTMLElement): void {
     container.innerHTML = '';
@@ -18,6 +19,7 @@ export function renderBoard(container: HTMLElement): void {
             <span>GitterSync Demo</span>
         </div>
         <div class="top-bar-actions">
+            <button class="btn-help" data-action="help" title="Help guide">?</button>
             <button class="btn-sm btn-secondary" data-action="pull" title="Pull from GitHub">⬇️</button>
             <button class="btn-sm btn-secondary" data-action="push" title="Push to GitHub">⬆️</button>
             <button class="btn-sm btn-primary" data-action="sync" title="Full sync">🔄 Sync</button>
@@ -25,8 +27,13 @@ export function renderBoard(container: HTMLElement): void {
                 <input type="checkbox" id="auto-sync" checked>
                 Auto
             </label>
+            <a href="https://paypal.me/GovindBhumkarIN" target="_blank" class="sponsor-link" title="Support this project">♥ Sponsor</a>
         </div>
     `;
+
+    topBar.querySelector('[data-action="help"]')?.addEventListener('click', () => {
+        showHelpDialog('board');
+    });
 
     topBar.querySelector('[data-action="pull"]')?.addEventListener('click', async () => {
         const { pullChanges } = await import('../gittersync-adapter');

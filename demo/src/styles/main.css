@@ -738,6 +738,73 @@ label {
     background: var(--bg-hover);
 }
 
+/* ─── Help Dialog ────────────────────────────────────────────────── */
+.help-dialog {
+    max-width: 560px;
+}
+
+.help-body {
+    max-height: 55vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.help-section h4 {
+    font-size: 0.9rem;
+    color: var(--accent);
+    margin-bottom: 0.35rem;
+}
+
+.help-section p,
+.help-section li {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.help-section ol,
+.help-section ul {
+    padding-left: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.help-section code {
+    background: var(--bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    color: var(--text);
+}
+
+.btn-help {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 0.85rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    line-height: 1;
+}
+
+.btn-help:hover {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+}
+
 /* ─── Scrollbar ──────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;
@@ -755,4 +822,19 @@ label {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--border);
+}
+
+/* ─── Sponsor Link ──────────────────────────────────────────────── */
+.sponsor-link {
+    color: #f43f5e;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.8rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: var(--radius);
+    transition: background 0.15s ease;
+}
+.sponsor-link:hover {
+    background: var(--bg-hover);
+    text-decoration: underline;
 }

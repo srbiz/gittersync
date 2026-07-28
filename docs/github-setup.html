@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub Setup FAQ — GitterSync</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #00d4aa;
+    --accent-dim: rgba(0, 212, 170, 0.15);
+    --code-bg: #1c2128;
+    --heading: #f0f6fc;
+    --max-w: 800px;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+    padding: 2rem 1rem;
+  }
+  .container { max-width: var(--max-w); margin: 0 auto; }
+
+  header {
+    text-align: center;
+    padding: 3rem 0 2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2.5rem;
+  }
+  header h1 { font-size: 2rem; color: var(--heading); }
+  header p { color: var(--text-muted); margin-top: 0.5rem; }
+  header a { color: var(--accent); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+
+  section { margin-bottom: 2.5rem; }
+  h2 { font-size: 1.3rem; color: var(--heading); margin-bottom: 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.05rem; color: var(--heading); margin: 1.2rem 0 0.5rem; }
+  p { margin-bottom: 0.8rem; }
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+  li { margin-bottom: 0.3rem; }
+
+  strong { color: var(--heading); }
+
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0.8rem 0 1.2rem;
+  }
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  pre code { background: none; padding: 0; border-radius: 0; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 14px;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+  }
+  th { background: var(--surface); color: var(--heading); font-weight: 600; }
+  td { background: var(--code-bg); }
+
+  .note {
+    background: var(--accent-dim);
+    border-left: 3px solid var(--accent);
+    padding: 0.8rem 1rem;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    margin: 0.8rem 0 1.2rem;
+    font-size: 14px;
+  }
+  .note code { background: rgba(0,212,170,0.12); }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 0;
+    margin-top: 3rem;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>GitHub Setup FAQ</h1>
+  <p>Common questions about setting up GitHub repositories and tokens for <a href="https://github.com/srbiz/gittersync">GitterSync</a></p>
+</header>
+
+<section>
+  <h2>Do I need to create the GitHub repository manually?</h2>
+  <p><strong>Yes.</strong> GitterSync does <strong>not</strong> automatically create repositories. You must create one manually on GitHub before using it as a database:</p>
+  <ol>
+    <li>Go to <a href="https://github.com/new">github.com/new</a></li>
+    <li>Choose a name (e.g., <code>my-app-data</code>)</li>
+    <li>Set visibility to <strong>Private</strong> or <strong>Public</strong> (private is recommended for production)</li>
+    <li>Click <strong>Create repository</strong></li>
+    <li>Pass the <code>owner</code> and <code>repo</code> to <code>GitHubSyncService</code></li>
+  </ol>
+  <pre><code>const sync = new GitHubSyncService({
+  owner: 'your-username',
+  repo: 'my-app-data',   // must already exist
+})</code></pre>
+  <div class="note">The integration tests in <code>tests/integration/</code> create temporary repos programmatically, but that's test-only code — not part of the published library.</div>
+</section>
+
+<section>
+  <h2>Can I use a private repository?</h2>
+  <p><strong>Yes.</strong> Private repositories work with no library changes. Your PAT just needs the <code>repo</code> scope (which grants access to private repos owned by you).</p>
+  <pre><code>const sync = new GitHubSyncService({
+  owner: 'your-username',
+  repo: 'my-private-app-data',
+})</code></pre>
+  <p>GitterSync stores data as JSON files — contents are visible on github.com to anyone with repo access. For sensitive data, use a private repo and optionally enable end-to-end encryption.</p>
+
+  <h3>Public vs Private</h3>
+  <table>
+    <tr>
+      <th>Aspect</th>
+      <th>Public</th>
+      <th>Private</th>
+    </tr>
+    <tr>
+      <td>Visibility</td><td>Anyone can view files</td><td>Only you + collaborators</td>
+    </tr>
+    <tr>
+      <td>PAT scope</td><td><code>repo</code> or fine-grained <code>Contents</code></td><td><code>repo</code> (full private access)</td>
+    </tr>
+    <tr>
+      <td>GitHub Pages demo</td><td>Works</td><td>Doesn't work (no public URL)</td>
+    </tr>
+    <tr>
+      <td>Use case</td><td>Demos, open-source apps</td><td>Production, sensitive data</td>
+    </tr>
+  </table>
+</section>
+
+<section>
+  <h2>Can I use the same PAT for multiple database repositories?</h2>
+  <p><strong>Yes.</strong> A PAT is account-scoped, not repo-scoped. One token works across all repos your token has access to:</p>
+  <pre><code>const token = 'ghp_your_token_here'
+
+const db1 = new GitHubSyncService({ owner: 'you', repo: 'app-data' })
+const db2 = new GitHubSyncService({ owner: 'you', repo: 'app-backup' })
+const db3 = new GitHubSyncService({ owner: 'org', repo: 'shared-data' })
+
+await db1.init(token)
+await db2.init(token)
+await db3.init(token)</code></pre>
+  <p>Each <code>GitHubSyncService</code> instance maintains its own:</p>
+  <ul>
+    <li>Local Dexie database (separate IndexedDB data per instance)</li>
+    <li>Sync cursor (tracks last synced commit per repo)</li>
+    <li>Changelog queue (pending local changes per repo)</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What PAT scopes are required?</h2>
+
+  <h3>Classic Token</h3>
+  <table>
+    <tr><th>Scope</th><th>Required For</th></tr>
+    <tr><td><code>repo</code></td><td>Private repos + full access to public repos</td></tr>
+  </table>
+  <p>The <code>repo</code> scope is sufficient for all GitterSync operations: reading/writing files, comparing commits, checking repo size, uploading binaries.</p>
+
+  <h3>Fine-grained Token</h3>
+  <table>
+    <tr><th>Permission</th><th>Access Level</th><th>Required For</th></tr>
+    <tr><td>Contents</td><td>Read and write</td><td>Reading/writing collection files, changelogs, meta.json</td></tr>
+    <tr><td>Metadata</td><td>Read-only</td><td>Repo size, commit comparisons</td></tr>
+  </table>
+  <p>Fine-grained tokens are more secure because they're scoped to specific repos, but classic tokens are simpler for getting started.</p>
+</section>
+
+<section>
+  <h2>Where do I create the PAT?</h2>
+  <ol>
+    <li><strong>Classic token</strong>: <a href="https://github.com/settings/tokens">github.com/settings/tokens</a>
+      <ul>
+        <li>Click <strong>Generate new token (classic)</strong></li>
+        <li>Select <code>repo</code> scope</li>
+        <li>Copy the token immediately — it's shown only once</li>
+      </ul>
+    </li>
+    <li><strong>Fine-grained token</strong>: <a href="https://github.com/settings/personal-access-tokens/new">github.com/settings/personal-access-tokens/new</a>
+      <ul>
+        <li>Select the repository you want to use as a database</li>
+        <li>Grant <strong>Contents: Read and write</strong> + <strong>Metadata: Read-only</strong></li>
+        <li>Create and copy the token</li>
+      </ul>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <h2>What happens if the repo doesn't exist?</h2>
+  <p><code>init()</code> calls <code>octokit.repos.get()</code> to verify the repo exists and is accessible. If the repo doesn't exist, or the token lacks access, an <code>AuthError</code> is thrown:</p>
+  <pre><code>try {
+  await sync.init(token)
+} catch (err) {
+  if (err instanceof AuthError) {
+    // Repo doesn't exist, or token lacks access
+    console.error('Check repo name and token permissions')
+  }
+}</code></pre>
+</section>
+
+<section>
+  <h2>Can multiple apps share the same database repo?</h2>
+  <p><strong>Yes.</strong> Multiple apps (or multiple instances of the same app) can point to the same GitHub repo. Each instance:</p>
+  <ul>
+    <li>Has its own local Dexie database</li>
+    <li>Tracks its own sync cursor</li>
+    <li>Pushes its own changelogs</li>
+    <li>Pulls changes from other instances via the Compare Commits API</li>
+  </ul>
+  <p>This is the multi-device scenario — the field-level LWW merge algorithm handles concurrent edits from different devices.</p>
+</section>
+
+<footer>
+  <p><a href="https://github.com/srbiz/gittersync">GitterSync</a> &mdash; MIT License</p>
+</footer>
+
+</div>
+</body>
+</html>

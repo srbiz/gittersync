@@ -9,6 +9,7 @@
  * - Field-level LWW merge using the merge module
  */
 
+import JSZip from 'jszip';
 import { GitHubApiAdapter } from './github-api';
 import { LocalDB } from './local-db';
 import { mergeDocument, applyChangelogToCollection, getExpiredDeletes } from './merge';
@@ -21,11 +22,13 @@ import type {
     ChangelogFile,
     CollectionFile,
     MetaFile,
+    MigrationStep,
+    ExportManifest,
     SyncedDocument,
     DeviceId,
     FileRef,
 } from './types';
-import { ConflictError, AuthError } from './types';
+import { ConflictError, AuthError, ValidationError } from './types';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -74,6 +77,7 @@ export class GitHubSyncService {
             maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
             retryBaseDelay: config.retryBaseDelay ?? 1000,
             onSyncStatusChange: config.onSyncStatusChange ?? (() => {}),
+            migrations: config.migrations ?? [],
         };
 
         this.api = new GitHubApiAdapter(config);
@@ -171,6 +175,9 @@ export class GitHubSyncService {
             }
         }
 
+        // 4.5. Run schema migrations if needed
+        await this.runMigrations(meta, collections);
+
         // 5. Apply changelog entries that are newer than the collection files
         const changelogFiles = await this.api.listDirectory('changelog');
         const changelogs: ChangelogFile[] = [];
@@ -213,6 +220,10 @@ export class GitHubSyncService {
             return { type: 'none' };
         }
 
+        // 1.5. Fetch meta.json for migration check
+        const metaResult = await this.api.fetchJsonFile<MetaFile>('meta.json');
+        const meta = metaResult?.content as MetaFile | null;
+
         // 2. Download only changed files
         const changedCollections: Record<string, CollectionFile> = {};
         const changelogs: ChangelogFile[] = [];
@@ -237,6 +248,9 @@ export class GitHubSyncService {
             }
         }
 
+        // 2.5. Run schema migrations if needed
+        await this.runMigrations(meta, changedCollections);
+
         // 3. Merge into local database
         for (const [name, collectionFile] of Object.entries(changedCollections)) {
             await this.mergeCollectionFileToLocal(name, collectionFile);
@@ -255,6 +269,54 @@ export class GitHubSyncService {
 
         this.emitStatus();
         return { type: 'incremental', collections: changedCollections, changelogs };
+    }
+
+    /**
+     * Run schema migrations on collection data when the remote schema
+     * version is higher than the local one.
+     *
+     * Migrations are applied in order of their `from` version. Each
+     * migration's transform function is called with every collection's
+     * documents, giving it a chance to reshape the data.
+     *
+     * @param meta - Remote meta.json (null if repo is empty)
+     * @param collections - Downloaded collection files (mutated in place)
+     */
+    private async runMigrations(
+        meta: MetaFile | null,
+        collections: Record<string, CollectionFile>,
+    ): Promise<void> {
+        if (!meta) return;
+
+        const remoteVersion = meta.schemaVersion;
+        const localVersion = await this.localDb.getSchemaVersion();
+
+        if (remoteVersion <= localVersion) return;
+
+        const migrations = this.config.migrations;
+
+        if (migrations.length === 0) {
+            // No migrations defined but remote has higher version —
+            // just update local version to match
+            await this.localDb.setSchemaVersion(remoteVersion);
+            return;
+        }
+
+        // Sort migrations by 'from' version and run applicable ones
+        const sorted = [...migrations].sort((a, b) => a.from - b.from);
+
+        for (const step of sorted) {
+            // Skip migrations that have already been applied or that go beyond remote
+            if (step.from < localVersion || step.to > remoteVersion) continue;
+
+            // Apply transform to each collection's documents
+            for (const [name, collectionFile] of Object.entries(collections)) {
+                const transformed = step.transform(name, collectionFile.documents, meta);
+                collectionFile.documents = transformed;
+            }
+        }
+
+        await this.localDb.setSchemaVersion(remoteVersion);
     }
 
     // ─── Push ───────────────────────────────────────────────────────────
@@ -489,8 +551,6 @@ export class GitHubSyncService {
 
     /**
      * Download a binary file from GitHub.
-     *
-     * Uses the raw content URL — avoids base64 string length limits on mobile.
      */
     async downloadFile(filePath: string): Promise<Blob> {
         this.ensureInitialized();
@@ -499,7 +559,171 @@ export class GitHubSyncService {
             throw new Error('Not authenticated');
         }
 
-        return this.api.downloadBinaryFile(filePath, this.token);
+        return this.api.downloadBinaryFile(filePath);
+    }
+
+    // ─── Data Export/Import ────────────────────────────────────────────
+
+    /**
+     * Export all data from GitHub as a ZIP file.
+     *
+     * Fetches meta.json, all collection files, changelogs, and binary files
+     * from the remote repository and packages them into a downloadable ZIP.
+     *
+     * @returns A Blob containing the ZIP archive
+     */
+    async exportData(): Promise<Blob> {
+        this.ensureInitialized();
+
+        const zip = new JSZip();
+        const folder = zip.folder('gittersync-export')!;
+
+        // 1. Fetch meta.json
+        const metaResult = await this.api.fetchJsonFile<MetaFile>('meta.json');
+        if (metaResult) {
+            folder.file('meta.json', JSON.stringify(metaResult.content, null, 2));
+        }
+
+        // 2. Determine collection names
+        const meta = metaResult?.content as MetaFile | undefined;
+        const collectionNames =
+            meta?.collections && Object.keys(meta.collections).length > 0
+                ? Object.keys(meta.collections)
+                : await this.guessCollectionNames();
+
+        // 3. Fetch each collection file
+        let changelogCount = 0;
+        for (const name of collectionNames) {
+            const result = await this.api.fetchJsonFile<CollectionFile>(`collections/${name}.json`);
+            if (result) {
+                folder.file(`collections/${name}.json`, JSON.stringify(result.content, null, 2));
+            }
+        }
+
+        // 4. Fetch changelog files
+        const changelogFiles = await this.api.listDirectory('changelog');
+        for (const fileName of changelogFiles) {
+            const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${fileName}`);
+            if (result) {
+                folder.file(`changelog/${fileName}`, JSON.stringify(result.content, null, 2));
+                changelogCount++;
+            }
+        }
+
+        // 5. Fetch binary files
+        let fileCount = 0;
+        const binaryFiles = await this.api.listDirectory('files');
+        for (const fileName of binaryFiles) {
+            try {
+                const blob = await this.api.downloadBinaryFile(`files/${fileName}`);
+                folder.file(`files/${fileName}`, blob);
+                fileCount++;
+            } catch {
+                // Skip files that fail to download (may have been deleted)
+            }
+        }
+
+        // 6. Create manifest
+        const manifest: ExportManifest = {
+            exportedAt: new Date().toISOString(),
+            sourceVersion: '1.3.1',
+            collections: collectionNames,
+            changelogCount,
+            fileCount,
+        };
+        folder.file('manifest.json', JSON.stringify(manifest, null, 2));
+
+        // 7. Generate ZIP blob
+        return folder.generateAsync({ type: 'blob' });
+    }
+
+    /**
+     * Import data from a ZIP file, replacing local data.
+     *
+     * Parses the ZIP, validates its structure, replaces local collection data,
+     * clears the sync cursor (to force a full re-sync on next pull), and updates
+     * the local schema version if meta.json contains one.
+     *
+     * @param file - The ZIP file to import (as File or Blob)
+     * @throws {ValidationError} If the file is not a valid ZIP or has invalid structure
+     */
+    async importData(file: File | Blob): Promise<void> {
+        this.ensureInitialized();
+
+        // 1. Parse ZIP
+        let zip: JSZip;
+        try {
+            const buffer = await file.arrayBuffer();
+            zip = await JSZip.loadAsync(buffer);
+        } catch {
+            throw new ValidationError('file', 'Invalid or corrupted ZIP file');
+        }
+
+        // Support both flat and nested (gittersync-export/) structures
+        let prefix = '';
+        if (zip.file('gittersync-export/manifest.json')) {
+            prefix = 'gittersync-export/';
+        }
+
+        // 2. Validate structure
+        const manifestFile = zip.file(`${prefix}manifest.json`);
+        if (!manifestFile) {
+            throw new ValidationError('manifest.json', 'Export ZIP is missing manifest.json');
+        }
+
+        // Check for at least one collection file
+        const collectionFiles = zip
+            .file(new RegExp(`^${prefix}collections/.+\\.json$`))
+            .filter((f) => !f.dir);
+        if (collectionFiles.length === 0) {
+            throw new ValidationError('collections', 'Export ZIP contains no collection files');
+        }
+
+        // 3. Read manifest
+        const manifestText = await manifestFile.async('string');
+        const manifest = JSON.parse(manifestText) as ExportManifest;
+
+        // 4. Read and apply each collection
+        for (const collectionFile of collectionFiles) {
+            const fileName = collectionFile.name.replace(`${prefix}collections/`, '');
+            const collectionName = fileName.replace('.json', '');
+
+            // Ensure collection is registered
+            if (!this.localDb.getRegisteredCollections().includes(collectionName)) {
+                await this.localDb.registerCollection(collectionName);
+            }
+
+            const content = await collectionFile.async('string');
+            const collectionData = JSON.parse(content) as CollectionFile;
+
+            // Convert documents array to map format for replaceCollection
+            const documents: Record<string, SyncedDocument> = {};
+            if (collectionData.documents) {
+                for (const [docId, doc] of Object.entries(
+                    collectionData.documents as Record<string, SyncedDocument>,
+                )) {
+                    documents[docId] = doc;
+                }
+            }
+
+            await this.localDb.replaceCollection(collectionName, documents);
+        }
+
+        // 5. Update schema version from meta.json if present
+        const metaFile = zip.file(`${prefix}meta.json`);
+        if (metaFile) {
+            const metaText = await metaFile.async('string');
+            const meta = JSON.parse(metaText) as MetaFile;
+            if (typeof meta.schemaVersion === 'number') {
+                await this.localDb.setSchemaVersion(meta.schemaVersion);
+            }
+        }
+
+        // 6. Clear sync cursor to force full re-sync
+        await this.localDb.clearSyncCursor();
+
+        // 7. Emit status change
+        this.emitStatus();
     }
 
     // ─── Auto Sync ─────────────────────────────────────────────────────

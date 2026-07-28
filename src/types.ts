@@ -128,6 +128,43 @@ export interface MetaFile {
     changelogCount: number;
 }
 
+// ─── Schema Migrations ──────────────────────────────────────────────────────
+
+/** A function that transforms a collection's documents during migration */
+export type MigrationTransform = (
+    collection: string,
+    documents: Record<string, SyncedDocument>,
+    meta: MetaFile,
+) => Record<string, SyncedDocument>;
+
+/** A single migration step that transforms documents from one schema version to the next */
+export interface MigrationStep {
+    /** Schema version this migration starts from */
+    from: number;
+    /** Schema version this migration produces */
+    to: number;
+    /** Human-readable description of what this migration does */
+    description: string;
+    /** Transform function applied to each collection's documents */
+    transform: MigrationTransform;
+}
+
+// ─── Data Export/Import ─────────────────────────────────────────────────────
+
+/** Metadata stored in the export ZIP manifest */
+export interface ExportManifest {
+    /** ISO 8601 timestamp of when the export was created */
+    exportedAt: string;
+    /** GitterSync library version that created the export */
+    sourceVersion: string;
+    /** List of collection names included in the export */
+    collections: string[];
+    /** Number of changelog files included */
+    changelogCount: number;
+    /** Number of binary files included */
+    fileCount: number;
+}
+
 // ─── File References ───────────────────────────────────────────────────────
 
 /** Metadata for a binary file stored in the `files/` directory */
@@ -192,6 +229,8 @@ export interface GitHubSyncConfig {
     retryBaseDelay?: number;
     /** Callback for sync status changes — used by UI */
     onSyncStatusChange?: (status: SyncStatus) => void;
+    /** Schema migration steps — run on pull when remote schemaVersion > local */
+    migrations?: MigrationStep[];
 }
 
 // ─── Errors ────────────────────────────────────────────────────────────────

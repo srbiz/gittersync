@@ -50,7 +50,7 @@ export function renderTaskDetail(task: Task, columnId: ColumnId, isNew = false):
                     <div class="form-group">
                         <label>Labels</label>
                         <div style="display:flex;gap:0.5rem">
-                            <input type="text" id="label-input" placeholder="Add a label" style="flex:1">
+                            <input type="text" id="label-input" placeholder="Type label + Enter" style="flex:1">
                             <input type="color" id="label-color" value="#3b82f6" style="width:40px;padding:0.25rem">
                         </div>
                         <div id="labels-container" style="display:flex;flex-wrap:wrap;gap:0.25rem;margin-top:0.5rem">

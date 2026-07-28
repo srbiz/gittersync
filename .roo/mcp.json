@@ -6,6 +6,9 @@
 				"-y",
 				"@modelcontextprotocol/server-filesystem",
 				"E:/gittersync"
+			],
+			"alwaysAllow": [
+				"list_directory"
 			]
 		},
 		"playwright": {

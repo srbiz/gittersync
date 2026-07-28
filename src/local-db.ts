@@ -366,6 +366,14 @@ export class LocalDB {
     }
 
     /**
+     * Clear the sync cursor so the next pull performs a full re-sync.
+     * Used after importing data to ensure consistency.
+     */
+    async clearSyncCursor(): Promise<void> {
+        await this.metaDb.sync_meta.delete('syncCursor');
+    }
+
+    /**
      * Get the local schema version.
      */
     async getSchemaVersion(): Promise<number> {

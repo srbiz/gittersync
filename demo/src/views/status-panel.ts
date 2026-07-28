@@ -3,7 +3,8 @@
  */
 
 import { getState, subscribe, showMessage } from '../state';
-import { pushChanges, pullChanges, fullSync, compact, getFullStatus } from '../gittersync-adapter';
+import { pushChanges, pullChanges, fullSync, compact, getFullStatus, exportData, importData } from '../gittersync-adapter';
+import { showHelpDialog } from '../components/help-dialog';
 
 let panel: HTMLElement | null = null;
 
@@ -25,7 +26,10 @@ export function showStatusPanel(): void {
         panel.innerHTML = `
             <h2>
                 <span>📊 Sync Status</span>
-                <button class="btn-icon" data-action="close">✕</button>
+                <span>
+                    <button class="btn-help" data-action="help" title="Help guide" style="margin-right:0.5rem">?</button>
+                    <button class="btn-icon" data-action="close">✕</button>
+                </span>
             </h2>
             <div class="status-grid">
                 <div class="status-item">
@@ -70,12 +74,19 @@ export function showStatusPanel(): void {
                 <button class="btn-sm btn-secondary" data-action="push">⬆️ Push</button>
                 <button class="btn-sm btn-primary" data-action="sync">🔄 Full Sync</button>
                 <button class="btn-sm btn-secondary" data-action="compact">🗜️ Compact</button>
+                <button class="btn-sm btn-secondary" data-action="export">📦 Export</button>
+                <button class="btn-sm btn-secondary" data-action="import">📂 Import</button>
                 <button class="btn-sm btn-secondary" data-action="refresh">🔄 Refresh Status</button>
             </div>
+            <input type="file" id="import-file-input" accept=".zip" style="display:none">
             <p style="text-align:center;margin-top:1rem;color:var(--text-muted);font-size:0.75rem">
                 Auto-sync every 30s &middot; Toggle in top bar
             </p>
         `;
+
+        panel.querySelector('[data-action="help"]')?.addEventListener('click', () => {
+            showHelpDialog('status');
+        });
 
         panel.querySelector('[data-action="close"]')?.addEventListener('click', () => {
             panel?.remove();
@@ -99,6 +110,26 @@ export function showStatusPanel(): void {
             await compact();
             await getFullStatus();
         });
+        panel.querySelector('[data-action="export"]')?.addEventListener('click', async () => {
+            await exportData();
+            await getFullStatus();
+        });
+        panel.querySelector('[data-action="import"]')?.addEventListener('click', () => {
+            const fileInput = document.getElementById('import-file-input') as HTMLInputElement;
+            if (!fileInput) return;
+            fileInput.click();
+        });
+        const fileInput = document.getElementById('import-file-input') as HTMLInputElement;
+        if (fileInput) {
+            fileInput.addEventListener('change', async () => {
+                const file = fileInput.files?.[0];
+                if (file) {
+                    await importData(file);
+                    await getFullStatus();
+                    fileInput.value = '';
+                }
+            });
+        }
         panel.querySelector('[data-action="refresh"]')?.addEventListener('click', async () => {
             await getFullStatus();
             showMessage('info', 'Status refreshed');

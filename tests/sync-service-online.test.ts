@@ -38,6 +38,8 @@ const {
     mockLocalDbClearChangelogEntries,
     mockLocalDbQueueChangelogEntry,
     mockLocalDbGetSchemaVersion,
+    mockLocalDbSetSchemaVersion,
+    mockLocalDbClearSyncCursor,
     mockMergeDocument,
     mockApplyChangelogToCollection,
     mockGetExpiredDeletes,
@@ -67,6 +69,8 @@ const {
     mockLocalDbClearChangelogEntries: vi.fn(),
     mockLocalDbQueueChangelogEntry: vi.fn(),
     mockLocalDbGetSchemaVersion: vi.fn(),
+    mockLocalDbSetSchemaVersion: vi.fn(),
+    mockLocalDbClearSyncCursor: vi.fn(),
     mockMergeDocument: vi.fn(),
     mockApplyChangelogToCollection: vi.fn(),
     mockGetExpiredDeletes: vi.fn(),
@@ -109,6 +113,8 @@ vi.mock('../src/local-db', () => ({
         clearChangelogEntries: mockLocalDbClearChangelogEntries,
         queueChangelogEntry: mockLocalDbQueueChangelogEntry,
         getSchemaVersion: mockLocalDbGetSchemaVersion,
+        setSchemaVersion: mockLocalDbSetSchemaVersion,
+        clearSyncCursor: mockLocalDbClearSyncCursor,
     })),
 }));
 

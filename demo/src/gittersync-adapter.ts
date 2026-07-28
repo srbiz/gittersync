@@ -228,6 +228,33 @@ export async function compact(): Promise<void> {
     showMessage('success', 'Compaction complete');
 }
 
+export async function exportData(): Promise<void> {
+    if (!syncService) return;
+    try {
+        const zipBlob = await syncService.exportData();
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `gittersync-export-${new Date().toISOString().slice(0, 10)}.zip`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showMessage('success', 'Data exported successfully');
+    } catch (err: any) {
+        showMessage('error', `Export failed: ${err.message}`);
+    }
+}
+
+export async function importData(file: File): Promise<void> {
+    if (!syncService) return;
+    try {
+        await syncService.importData(file);
+        await loadFromLocalDb();
+        showMessage('success', 'Data imported — next pull will re-sync from GitHub');
+    } catch (err: any) {
+        showMessage('error', `Import failed: ${err.message}`);
+    }
+}
+
 export async function uploadAttachment(task: Task, file: File): Promise<TaskAttachment | null> {
     const sync = syncService;
     if (!sync) return null;

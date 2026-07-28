@@ -47,6 +47,7 @@ export class GitHubApiAdapter {
             maxRetries: config.maxRetries ?? 3,
             retryBaseDelay: config.retryBaseDelay ?? 1000,
             onSyncStatusChange: config.onSyncStatusChange ?? (() => {}),
+            migrations: config.migrations ?? [],
         };
     }
 
@@ -341,24 +342,30 @@ export class GitHubApiAdapter {
     }
 
     /**
-     * Download a binary file using the raw content URL.
-     * Preferred over Content API for large files — avoids base64 string limits on mobile.
+     * Download a binary file using the GitHub Content API.
+     * Returns a Blob from the base64-encoded content returned by the API.
      */
-    async downloadBinaryFile(path: string, token: string): Promise<Blob> {
-        const url = `https://raw.githubusercontent.com/${this.config.owner}/${this.config.repo}/${this.config.branch}/${path}`;
+    async downloadBinaryFile(path: string): Promise<Blob> {
+        this.ensureInitialized();
 
-        const response = await fetch(url, {
-            headers: {
-                Authorization: `token ${token}`,
-                Accept: 'application/octet-stream',
-            },
+        const { data } = await this.octokit!.repos.getContent({
+            owner: this.config.owner,
+            repo: this.config.repo,
+            path,
+            ref: this.config.branch,
         });
 
-        if (!response.ok) {
-            throw new Error(`Download failed for ${path}: HTTP ${response.status}`);
+        if ('content' in data && typeof data.content === 'string') {
+            const binaryStr = atob(data.content.replace(/\n/g, ''));
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+            }
+            const encoding = data.encoding === 'base64' ? 'application/octet-stream' : 'text/plain';
+            return new Blob([bytes], { type: encoding });
         }
 
-        return response.blob();
+        throw new Error(`Download failed for ${path}: unexpected response format`);
     }
 
     // ─── Repo Metadata ──────────────────────────────────────────────────

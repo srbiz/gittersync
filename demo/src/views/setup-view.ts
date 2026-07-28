@@ -10,6 +10,7 @@
 import { setState, showMessage } from '../state';
 import { loadSavedConfig, saveConfig, getDefaultConfig, initializeSync } from '../gittersync-adapter';
 import { hasStoredToken, retrieveToken, storeToken, clearStoredToken } from 'gittersync';
+import { showHelpDialog } from '../components/help-dialog';
 
 export function renderSetupView(container: HTMLElement): void {
     const savedConfig = loadSavedConfig() || getDefaultConfig();
@@ -18,7 +19,10 @@ export function renderSetupView(container: HTMLElement): void {
     container.innerHTML = `
         <div class="setup-screen">
             <div class="setup-card">
-                <div class="logo">GS</div>
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                    <div class="logo">GS</div>
+                    <button class="btn-help" data-action="help" title="Help">?</button>
+                </div>
                 <h1>GitterSync Demo</h1>
                 <p class="subtitle">Kanban Board — powered by GitHub as a database</p>
 
@@ -67,9 +71,16 @@ export function renderSetupView(container: HTMLElement): void {
                 </form>
 
                 ${hasToken ? `<p style="text-align:center;margin-top:1rem"><button class="btn-sm btn-secondary" id="clear-token">Clear stored token</button></p>` : ''}
+                <p style="text-align:center;margin-top:1.5rem;font-size:0.75rem;color:var(--text-muted)">
+                    ♥ <a href="https://paypal.me/GovindBhumkarIN" target="_blank" style="color:var(--text-muted)">Support this project</a>
+                </p>
             </div>
         </div>
     `;
+
+    container.querySelector('[data-action="help"]')?.addEventListener('click', () => {
+        showHelpDialog('setup');
+    });
 
     const encryptToggle = document.getElementById('encrypt-toggle') as HTMLInputElement;
     const passphraseGroup = document.getElementById('passphrase-group')!;

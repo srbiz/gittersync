@@ -4,8 +4,9 @@
 
 [![Live Demo](https://img.shields.io/badge/demo-live-00d4aa?style=for-the-badge)](https://srbiz.github.io/gittersync/)
 [![npm version](https://img.shields.io/npm/v/gittersync?color=00d4aa&label=npm)](https://www.npmjs.com/package/gittersync)
-[![CI](https://img.shields.io/github/actions/workflow/status/srbiz/gittersync/ci.yml?branch=main)](https://github.com/srbiz/gittersync/actions)
+
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Donate](https://img.shields.io/badge/Donate-PayPal-00457C?style=for-the-badge&logo=paypal)](https://paypal.me/GovindBhumkarIN)
 
 ## 🎮 Live Demo
 
@@ -20,6 +21,8 @@ Try GitterSync in action with our [**Kanban Board Demo**](https://srbiz.github.i
 - ✅ **Token encryption** with AES-256-GCM passphrase protection
 
 > **Quick start:** Open the demo, enter a GitHub PAT with `repo` scope, and start creating tasks. The default demo repo is ready to use!
+>
+> 🔧 New to GitHub? See the [GitHub Setup FAQ](docs/github-setup.md) for help with tokens, repos, and common questions.
 
 ### 🔑 GitHub Token Guidance
 
@@ -168,6 +171,132 @@ console.log(sync.isOnline) // true | false
 
 > **Note:** Online/offline detection uses the browser's `navigator.onLine` property and `online`/`offline` events. In non-browser environments (Node.js, SSR), `isOnline` defaults to `true` since there's no standard connectivity API.
 
+## Schema Migrations
+
+GitterSync supports a configurable migration pipeline that runs automatically when the remote `schemaVersion` in `meta.json` is higher than the local one. This allows your app to evolve its data model without breaking existing data.
+
+```typescript
+import { type MigrationStep, GitHubSyncService } from 'gittersync'
+
+const migrations: MigrationStep[] = [
+  {
+    from: 0,
+    to: 1,
+    description: 'Add version field to all documents',
+    transform: (collection, documents, meta) => {
+      const result: Record<string, SyncedDocument> = {}
+      for (const [id, doc] of Object.entries(documents)) {
+        result[id] = {
+          ...doc,
+          data: { ...doc.data, version: 1 },
+        }
+      }
+      return result
+    },
+  },
+  {
+    from: 1,
+    to: 2,
+    description: 'Add status field to users collection only',
+    transform: (collection, documents, meta) => {
+      if (collection !== 'users') return documents
+      const result: Record<string, SyncedDocument> = {}
+      for (const [id, doc] of Object.entries(documents)) {
+        result[id] = {
+          ...doc,
+          data: { ...doc.data, status: 'active' },
+        }
+      }
+      return result
+    },
+  },
+]
+
+const sync = new GitHubSyncService({
+  owner: 'your-username',
+  repo: 'your-data-repo',
+  migrations,
+})
+```
+
+### How It Works
+
+1. On `pull()`, after downloading collection files but before merging into the local database, GitterSync compares the remote `schemaVersion` (from `meta.json`) with the local `schemaVersion` (stored in IndexedDB)
+2. If the remote version is higher, each applicable `MigrationStep` transform runs in order of `from` version
+3. After all migrations, the local schema version is updated to match the remote version
+4. If no migrations are configured but the remote version is higher, the local version is simply updated — no data is transformed
+
+> **Important:** All devices must use the same migration definitions. Mismatched migrations can lead to data inconsistencies across devices.
+
+## Data Export/Import
+
+Export all data from GitHub as a ZIP file for backup, or import a ZIP to restore data on a new device. The import clears the sync cursor, forcing a full re-sync on the next pull.
+
+```typescript
+// Export all data as a downloadable ZIP
+const zipBlob = await sync.exportData()
+
+// Save as a file (browser)
+const url = URL.createObjectURL(zipBlob)
+const a = document.createElement('a')
+a.href = url
+a.download = `gittersync-export-${new Date().toISOString().slice(0, 10)}.zip`
+a.click()
+URL.revokeObjectURL(url)
+
+// Import from a ZIP file (File or Blob)
+const fileInput = document.getElementById('import-input') as HTMLInputElement
+const file = fileInput.files?.[0]
+if (file) {
+    await sync.importData(file)
+    // Sync cursor is cleared — next pull() will do a full re-sync
+}
+```
+
+### Export ZIP Structure
+
+```
+gittersync-export/
+├── manifest.json              # Export metadata
+├── meta.json                  # Remote meta.json (if present)
+├── collections/
+│   ├── users.json             # Per-collection document store
+│   └── posts.json
+├── changelog/
+│   └── 2026-07-27_deviceA.json
+└── files/
+    └── avatar.png             # Binary file attachments
+```
+
+### manifest.json Format
+
+```json
+{
+  "exportedAt": "2026-07-28T12:00:00Z",
+  "sourceVersion": "1.3.1",
+  "collections": ["users", "posts"],
+  "changelogCount": 3,
+  "fileCount": 2
+}
+```
+
+### Import Validation
+
+`importData()` validates the ZIP before applying any data:
+
+- **Non-ZIP files** throw a `ValidationError` with "Invalid or corrupted ZIP file"
+- **Missing `manifest.json`** throws a `ValidationError`
+- **No collection files** in the `collections/` directory throws a `ValidationError`
+
+The import preserves the local device ID — only collection data, schema version, and the sync cursor are affected.
+
+### API
+
+| Method | Description |
+|--------|-------------|
+| `exportData()` | Fetch all data from GitHub and return as a ZIP Blob |
+| `importData(file)` | Parse a ZIP file and replace local data |
+
 ## Binary File Sync
 
 ```typescript
@@ -249,6 +378,13 @@ const fullStatus = await sync.getFullStatus()
 | `createChangelogEntry(op, docId, fields, deviceId)` | Create a changelog entry |
 | `getExpiredDeletes(collection, maxAgeMs)` | Find IDs of expired soft-deletes |
 
+### Schema Migration Types
+
+| Type | Description |
+|------|-------------|
+| `MigrationTransform` | Function that transforms a collection's documents during migration |
+| `MigrationStep` | A single migration step with `from`, `to`, `description`, and `transform` |
+
 ### Error Classes
 
 | Class | Description |
@@ -283,7 +419,7 @@ npm install
 # Type-check
 npm run lint
 
-# Run unit tests (135 tests, excludes integration)
+# Run unit tests (158+ tests, excludes integration)
 npm test
 
 # Run integration tests (requires GITTERSYNC_TEST_TOKEN)
