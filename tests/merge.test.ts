@@ -494,41 +494,171 @@ describe('createChangelogEntry', () => {
 
 describe('getExpiredDeletes', () => {
     it('returns IDs of expired soft-deletes', () => {
+        // Anchor the fixtures to the current time so the test does not rot.
+        const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+        const now = Date.now();
+        const thirtyOneDaysAgo = new Date(now - thirtyDays - 24 * 60 * 60 * 1000).toISOString();
+        const oneHourAgo = new Date(now - 60 * 60 * 1000).toISOString();
+
         const docs = {
             u1: makeDoc(
                 'u1',
                 { name: 'Jane' },
                 {
-                    name: { updatedAt: '2026-07-27T10:00:00Z', device: 'deviceA' },
+                    name: { updatedAt: thirtyOneDaysAgo, device: 'deviceA' },
                 },
-                { deleted_at: '2026-06-01T00:00:00Z', deleted_by: 'deviceA' },
+                { deleted_at: thirtyOneDaysAgo, deleted_by: 'deviceA' },
             ),
             u2: makeDoc(
                 'u2',
                 { name: 'Bob' },
                 {
-                    name: { updatedAt: '2026-07-27T10:00:00Z', device: 'deviceA' },
+                    name: { updatedAt: oneHourAgo, device: 'deviceA' },
                 },
-                { deleted_at: '2026-07-27T00:00:00Z', deleted_by: 'deviceA' },
+                { deleted_at: oneHourAgo, deleted_by: 'deviceA' },
             ),
             u3: makeDoc(
                 'u3',
                 { name: 'Alice' },
                 {
-                    name: { updatedAt: '2026-07-27T10:00:00Z', device: 'deviceA' },
+                    name: { updatedAt: oneHourAgo, device: 'deviceA' },
                 },
             ),
         };
 
-        // 30 days in ms
-        const thirtyDays = 30 * 24 * 60 * 60 * 1000;
         const expired = getExpiredDeletes(docs, thirtyDays);
 
-        // u1 was deleted over 30 days ago (June 1 vs now ~July 27)
-        // u2 was deleted recently (July 27)
+        // u1 was deleted over 30 days ago
+        // u2 was deleted recently (1 hour ago)
         // u3 is not deleted
         expect(expired).toContain('u1');
         expect(expired).not.toContain('u2');
         expect(expired).not.toContain('u3');
+    });
+});
+
+// ─── Changelog upsert semantics ────────────────────────────────────────────
+
+describe('applyChangelogToCollection — unknown-document handling', () => {
+    it("upserts an 'update' entry for a document the collection has never seen", () => {
+        // A brand-new device (or a compaction on an empty collection file) must
+        // not drop update entries just because the create has not been seen.
+        const collection: CollectionFile = {
+            collection: 'users',
+            version: 0,
+            updatedAt: '2026-07-27T00:00:00Z',
+            documents: {},
+        };
+
+        const changes: ChangelogEntry[] = [
+            {
+                collection: 'users',
+                docId: 'u1',
+                op: 'update',
+                fields: {
+                    name: { value: 'Alice', updatedAt: '2026-07-27T12:00:00Z' },
+                    email: { value: 'alice@example.com', updatedAt: '2026-07-27T12:00:00Z' },
+                },
+            },
+        ];
+
+        const result = applyChangelogToCollection(collection, changes, 'deviceB');
+
+        expect(result.documents.u1).toBeDefined();
+        expect((result.documents.u1.data as any).name).toBe('Alice');
+        expect((result.documents.u1.data as any).email).toBe('alice@example.com');
+        expect(result.documents.u1.deleted_at).toBeNull();
+    });
+
+    it('still applies field-level LWW when the document exists', () => {
+        const collection: CollectionFile = {
+            collection: 'users',
+            version: 1,
+            updatedAt: '2026-07-27T00:00:00Z',
+            documents: {
+                u1: makeDoc(
+                    'u1',
+                    { name: 'Jane' },
+                    { name: { updatedAt: '2026-07-27T09:00:00Z', device: 'deviceA' } },
+                ),
+            },
+        };
+
+        const result = applyChangelogToCollection(
+            collection,
+            [
+                {
+                    collection: 'users',
+                    docId: 'u1',
+                    op: 'update',
+                    fields: {
+                        name: { value: 'Jane Updated', updatedAt: '2026-07-27T12:00:00Z' },
+                    },
+                },
+            ],
+            'deviceB',
+        );
+
+        expect((result.documents.u1.data as any).name).toBe('Jane Updated');
+        expect(result.documents.u1.created_at).toBe('2026-07-01T00:00:00Z');
+    });
+
+    it("records a tombstone for a 'delete' entry of an unknown document", () => {
+        const collection: CollectionFile = {
+            collection: 'users',
+            version: 0,
+            updatedAt: '2026-07-27T00:00:00Z',
+            documents: {},
+        };
+
+        const result = applyChangelogToCollection(
+            collection,
+            [
+                {
+                    collection: 'users',
+                    docId: 'ghost',
+                    op: 'delete',
+                    deletedAt: '2026-07-27T12:00:00Z',
+                },
+            ],
+            'deviceB',
+        );
+
+        expect(result.documents.ghost).toBeDefined();
+        expect(result.documents.ghost.deleted_at).toBe('2026-07-27T12:00:00Z');
+        expect(result.documents.ghost.deleted_by).toBe('deviceB');
+    });
+
+    it('replays a create-then-update sequence from a fresh collection file', () => {
+        const collection: CollectionFile = {
+            collection: 'users',
+            version: 0,
+            updatedAt: '2026-07-27T00:00:00Z',
+            documents: {},
+        };
+
+        const changes: ChangelogEntry[] = [
+            {
+                collection: 'users',
+                docId: 'u1',
+                op: 'create',
+                fields: { name: { value: 'Alice', updatedAt: '2026-07-27T10:00:00Z' } },
+            },
+            {
+                collection: 'users',
+                docId: 'u1',
+                op: 'update',
+                fields: {
+                    email: { value: 'alice@example.com', updatedAt: '2026-07-27T11:00:00Z' },
+                },
+            },
+        ];
+
+        const result = applyChangelogToCollection(collection, changes, 'deviceB');
+
+        expect((result.documents.u1.data as any).name).toBe('Alice');
+        expect((result.documents.u1.data as any).email).toBe('alice@example.com');
+        expect(result.documents.u1._fields.name.updatedAt).toBe('2026-07-27T10:00:00Z');
+        expect(result.documents.u1._fields.email.updatedAt).toBe('2026-07-27T11:00:00Z');
     });
 });

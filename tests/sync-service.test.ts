@@ -793,3 +793,147 @@ describe('GitHubSyncService — getLocalDb', () => {
         expect(localDb).toBeDefined();
     });
 });
+
+// ─── pull — changelog-only repositories ─────────────────────────────────────
+
+describe('GitHubSyncService — pull (data that only exists in changelogs)', () => {
+    let service: GitHubSyncService;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        mockApiInit.mockResolvedValue(true);
+        mockLocalDbInit.mockResolvedValue('deviceB');
+        mockLocalDbGetDeviceId.mockReturnValue('deviceB');
+        mockLocalDbGetRegisteredCollections.mockReturnValue([]);
+        mockLocalDbSetSyncCursor.mockResolvedValue(undefined);
+        mockLocalDbGetSyncCursor.mockResolvedValue(null); // no cursor → full pull
+        mockLocalDbPutDocument.mockResolvedValue(undefined);
+        mockLocalDbRegisterCollection.mockResolvedValue(undefined);
+        mockApiGetLatestCommitSha.mockResolvedValue('head-sha');
+
+        service = createService();
+        await service.init('ghp_token');
+    });
+
+    it('materialises documents from changelogs when no collection files exist yet', async () => {
+        // Nothing compacted yet: no meta.json, no collections/, one changelog.
+        const changelog = makeChangelogFile('deviceA', [
+            {
+                collection: 'users',
+                docId: 'u1',
+                op: 'update',
+                fields: { name: { value: 'Alice', updatedAt: '2026-07-27T12:00:00Z' } },
+            },
+        ]);
+
+        mockApiFetchJsonFile.mockImplementation(async (path: string) => {
+            if (path === 'changelog/cl-1.json') return { content: changelog, sha: 'cl-sha' };
+            return null; // meta.json, collections/* all missing
+        });
+        mockApiListDirectory.mockImplementation(async (path: string) => {
+            if (path === 'changelog') return ['cl-1.json'];
+            return []; // collections/ is empty
+        });
+        mockLocalDbGetDocument.mockResolvedValue(undefined);
+
+        const result = await service.pull();
+
+        expect(result.type).toBe('full');
+        // The changelog's collection was discovered and registered
+        expect(mockLocalDbRegisterCollection).toHaveBeenCalledWith('users');
+        // The document was written locally instead of being dropped
+        expect(mockLocalDbPutDocument).toHaveBeenCalledWith(
+            'users',
+            expect.objectContaining({
+                id: 'u1',
+                data: { name: 'Alice' },
+                deleted_at: null,
+            }),
+            false,
+        );
+        // A cursor is established so the next pull can be incremental
+        expect(mockLocalDbSetSyncCursor).toHaveBeenCalledWith({
+            sha: 'head-sha',
+            timestamp: expect.any(String),
+        });
+    });
+
+    it('applies an update entry for an unknown document as an upsert', async () => {
+        const changelog = makeChangelogFile('deviceA', [
+            {
+                collection: 'users',
+                docId: 'u2',
+                op: 'update',
+                fields: {
+                    name: { value: 'Bob', updatedAt: '2026-07-27T12:00:00Z' },
+                    email: { value: 'bob@example.com', updatedAt: '2026-07-27T12:00:00Z' },
+                },
+            },
+        ]);
+
+        mockApiFetchJsonFile.mockImplementation(async (path: string) => {
+            if (path === 'changelog/cl-1.json') return { content: changelog, sha: 'cl-sha' };
+            return null;
+        });
+        mockApiListDirectory.mockImplementation(async (path: string) =>
+            path === 'changelog' ? ['cl-1.json'] : [],
+        );
+        mockLocalDbGetDocument.mockResolvedValue(undefined);
+
+        await service.pull();
+
+        expect(mockLocalDbPutDocument).toHaveBeenCalledWith(
+            'users',
+            expect.objectContaining({
+                id: 'u2',
+                data: { name: 'Bob', email: 'bob@example.com' },
+                _fields: {
+                    name: { updatedAt: '2026-07-27T12:00:00Z', device: 'deviceA' },
+                    email: { updatedAt: '2026-07-27T12:00:00Z', device: 'deviceA' },
+                },
+            }),
+            false,
+        );
+    });
+
+    it('records a tombstone when a delete arrives for an unknown document', async () => {
+        const changelog = makeChangelogFile('deviceA', [
+            {
+                collection: 'tasks',
+                docId: 't-gone',
+                op: 'delete',
+                deletedAt: '2026-07-27T12:00:00Z',
+            },
+        ]);
+
+        mockApiFetchJsonFile.mockImplementation(async (path: string) => {
+            if (path === 'changelog/cl-1.json') return { content: changelog, sha: 'cl-sha' };
+            return null;
+        });
+        mockApiListDirectory.mockImplementation(async (path: string) =>
+            path === 'changelog' ? ['cl-1.json'] : [],
+        );
+        mockLocalDbGetDocument.mockResolvedValue(undefined);
+
+        await service.pull();
+
+        expect(mockLocalDbPutDocument).toHaveBeenCalledWith(
+            'tasks',
+            expect.objectContaining({
+                id: 't-gone',
+                deleted_at: '2026-07-27T12:00:00Z',
+                deleted_by: 'deviceA',
+            }),
+            false,
+        );
+    });
+
+    it('still returns "none" when both collections and changelogs are empty', async () => {
+        mockApiFetchJsonFile.mockResolvedValue(null);
+        mockApiListDirectory.mockResolvedValue([]);
+
+        const result = await service.pull();
+
+        expect(result).toEqual({ type: 'none' });
+    });
+});

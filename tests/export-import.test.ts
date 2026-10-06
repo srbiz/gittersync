@@ -20,6 +20,7 @@ const {
     mockApiInit,
     mockApiFetchJsonFile,
     mockApiListDirectory,
+    mockApiListDirectoryRecursive,
     mockApiDownloadBinaryFile,
     mockLocalDbInit,
     mockLocalDbGetDeviceId,
@@ -33,6 +34,7 @@ const {
     mockApiInit: vi.fn(),
     mockApiFetchJsonFile: vi.fn(),
     mockApiListDirectory: vi.fn(),
+    mockApiListDirectoryRecursive: vi.fn(),
     mockApiDownloadBinaryFile: vi.fn(),
     mockLocalDbInit: vi.fn(),
     mockLocalDbGetDeviceId: vi.fn(),
@@ -49,6 +51,7 @@ vi.mock('../src/github-api', () => ({
         init: mockApiInit,
         fetchJsonFile: mockApiFetchJsonFile,
         listDirectory: mockApiListDirectory,
+        listDirectoryRecursive: mockApiListDirectoryRecursive,
         downloadBinaryFile: mockApiDownloadBinaryFile,
         getLatestCommitSha: vi.fn(),
         createOrUpdateFileWithRetry: vi.fn(),
@@ -153,9 +156,9 @@ describe('GitHubSyncService — exportData', () => {
 
         mockApiListDirectory.mockImplementation(async (path: string) => {
             if (path === 'changelog') return ['cl1.json'];
-            if (path === 'files') return ['avatar.png'];
             return [];
         });
+        mockApiListDirectoryRecursive.mockResolvedValue(['avatar.png']);
 
         const uint8 = new TextEncoder().encode('fake-image-data');
         mockApiDownloadBinaryFile.mockResolvedValue(uint8);
@@ -170,13 +173,14 @@ describe('GitHubSyncService — exportData', () => {
         expect(mockApiFetchJsonFile).toHaveBeenCalledWith('meta.json');
         expect(mockApiFetchJsonFile).toHaveBeenCalledWith('collections/users.json');
         expect(mockApiListDirectory).toHaveBeenCalledWith('changelog');
-        expect(mockApiListDirectory).toHaveBeenCalledWith('files');
+        expect(mockApiListDirectoryRecursive).toHaveBeenCalledWith('files');
         expect(mockApiDownloadBinaryFile).toHaveBeenCalledWith('files/avatar.png');
     });
 
     it('exports with empty repo (no collections)', async () => {
         mockApiFetchJsonFile.mockResolvedValue(null);
         mockApiListDirectory.mockResolvedValue([]);
+        mockApiListDirectoryRecursive.mockResolvedValue([]);
 
         const result = await service.exportData();
 
@@ -202,9 +206,9 @@ describe('GitHubSyncService — exportData', () => {
 
         mockApiListDirectory.mockImplementation(async (path: string) => {
             if (path === 'changelog') return [];
-            if (path === 'files') return ['avatar.png', 'doc.pdf'];
             return [];
         });
+        mockApiListDirectoryRecursive.mockResolvedValue(['avatar.png', 'doc.pdf']);
 
         const pngUint8 = new TextEncoder().encode('png-data');
         const pdfUint8 = new TextEncoder().encode('pdf-data');
@@ -410,5 +414,81 @@ describe('GitHubSyncService — importData', () => {
         await service.importData(zipBlob);
 
         expect(mockLocalDbSetSchemaVersion).not.toHaveBeenCalled();
+    });
+});
+
+// ─── Export ZIP layout ─────────────────────────────────────────────────────
+
+describe('GitHubSyncService — exportData ZIP layout', () => {
+    let service: GitHubSyncService;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        mockApiInit.mockResolvedValue(true);
+        mockLocalDbInit.mockResolvedValue('deviceA');
+        mockLocalDbGetDeviceId.mockReturnValue('deviceA');
+
+        service = createService();
+        await service.init('ghp_token');
+    });
+
+    it('nests all entries under the documented gittersync-export/ folder', async () => {
+        const JSZip = (await import('jszip')).default;
+
+        const metaFile: MetaFile = {
+            schemaVersion: 1,
+            collections: { users: { version: 1, sha: 'sha' } },
+            changelogCount: 0,
+        };
+        const collectionFile = makeCollectionFile('users', { u1: sampleDoc });
+
+        mockApiFetchJsonFile.mockImplementation(async (path: string) => {
+            if (path === 'meta.json') return { content: metaFile, sha: 'meta-sha' };
+            if (path === 'collections/users.json')
+                return { content: collectionFile, sha: 'col-sha' };
+            return null;
+        });
+        mockApiListDirectory.mockResolvedValue([]);
+        mockApiListDirectoryRecursive.mockResolvedValue([]);
+        mockApiListDirectoryRecursive.mockResolvedValue(['avatar.png']);
+        mockApiDownloadBinaryFile.mockResolvedValue(new TextEncoder().encode('img'));
+
+        const blob = await service.exportData();
+        const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+        const entries = Object.keys(zip.files).filter((name) => !zip.files[name].dir);
+
+        expect(entries.sort()).toEqual(
+            [
+                'gittersync-export/collections/users.json',
+                'gittersync-export/files/avatar.png',
+                'gittersync-export/manifest.json',
+                'gittersync-export/meta.json',
+            ].sort(),
+        );
+
+        // Every entry must live inside the folder — nothing leaks to the root
+        for (const entry of entries) {
+            expect(entry.startsWith('gittersync-export/')).toBe(true);
+        }
+    });
+
+    it('reports the current library version in the manifest', async () => {
+        const JSZip = (await import('jszip')).default;
+        const { LIBRARY_VERSION } = await import('../src/version');
+        const pkg = (await import('../package.json', { with: { type: 'json' } })).default;
+
+        mockApiFetchJsonFile.mockResolvedValue(null);
+        mockApiListDirectory.mockResolvedValue([]);
+        mockApiListDirectoryRecursive.mockResolvedValue([]);
+
+        const blob = await service.exportData();
+        const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+        const manifest = JSON.parse(
+            await zip.file('gittersync-export/manifest.json')!.async('string'),
+        ) as ExportManifest;
+
+        expect(manifest.sourceVersion).toBe(LIBRARY_VERSION);
+        // Guard against version drift between the constant and package.json
+        expect(LIBRARY_VERSION).toBe(pkg.version);
     });
 });

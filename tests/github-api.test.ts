@@ -17,6 +17,7 @@ const mockReposCreateOrUpdateFileContents = vi.fn();
 const mockReposDeleteFile = vi.fn();
 const mockReposCompareCommits = vi.fn();
 const mockReposListCommits = vi.fn();
+const mockGitGetTree = vi.fn();
 
 vi.mock('@octokit/rest', () => ({
     Octokit: vi.fn().mockImplementation(() => ({
@@ -30,6 +31,9 @@ vi.mock('@octokit/rest', () => ({
             deleteFile: mockReposDeleteFile,
             compareCommits: mockReposCompareCommits,
             listCommits: mockReposListCommits,
+        },
+        git: {
+            getTree: mockGitGetTree,
         },
     })),
 }));
@@ -599,5 +603,53 @@ describe('GitHubApiAdapter — property accessors', () => {
 
         expect(adapter.branch).toBe('main');
         expect(adapter.compactionThreshold).toBe(20);
+    });
+});
+
+// ─── listDirectoryRecursive ─────────────────────────────────────────────────
+
+describe('GitHubApiAdapter — listDirectoryRecursive', () => {
+    let adapter: GitHubApiAdapter;
+
+    beforeEach(async () => {
+        vi.clearAllMocks();
+        mockReposGet.mockResolvedValue({ data: { size: 1000 } });
+        adapter = createAdapter();
+        await adapter.init('ghp_token');
+    });
+
+    it('returns nested files relative to the requested folder', async () => {
+        mockGitGetTree.mockResolvedValue({
+            data: {
+                tree: [
+                    { path: 'files/pixel.png', type: 'blob' },
+                    { path: 'files/task-t1/notes.txt', type: 'blob' },
+                    { path: 'files/task-t1/deep/photo.jpg', type: 'blob' },
+                    { path: 'files', type: 'tree' },
+                    { path: 'files/task-t1', type: 'tree' },
+                    { path: 'collections/users.json', type: 'blob' },
+                ],
+            },
+        });
+
+        const files = await adapter.listDirectoryRecursive('files');
+
+        expect(files.sort()).toEqual(['pixel.png', 'task-t1/deep/photo.jpg', 'task-t1/notes.txt']);
+    });
+
+    it('returns an empty array when the folder does not exist', async () => {
+        const notFound = new Error('Not Found');
+        (notFound as any).status = 404;
+        mockGitGetTree.mockRejectedValue(notFound);
+
+        expect(await adapter.listDirectoryRecursive('files')).toEqual([]);
+    });
+
+    it('returns an empty array when only unrelated paths exist', async () => {
+        mockGitGetTree.mockResolvedValue({
+            data: { tree: [{ path: 'collections/users.json', type: 'blob' }] },
+        });
+
+        expect(await adapter.listDirectoryRecursive('files')).toEqual([]);
     });
 });
