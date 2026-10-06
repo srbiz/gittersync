@@ -16,7 +16,8 @@ npm run test:integration
 
 | Suite | Result |
 |---|---|
-| Unit tests (`npm test`) | 171 passed (was 158 before + 13 new regression tests) |
+| Unit tests (`npm test`) | 173 passed (158 before + 15 new regression tests) |
+| Unit tests under Node 20 | 173 passed (previously 12 failures — see defect 7) |
 | Integration (`e2e.test.ts`) | 21 passed |
 | Integration (`sync.test.ts`) | 10 passed |
 | `npm run lint` / `format:check` / `typecheck` / `build` | clean |
@@ -119,7 +120,28 @@ Two independent problems, both invisible because CI never runs integration tests
   current API, and the concurrency test now also verifies the second device's write
   reached the remote.
 
-### 7. Time-dependent unit test
+### 7. Token encryption failed on Node 20 (pre-existing CI failure)
+
+`npm test` passed locally on Node 22 but failed on Node 20 with 12 errors in
+`tests/crypto.test.ts`:
+
+```
+TypeError: Failed to normalize algorithm: 'salt' of 'Pbkdf2Params'
+(passed algorithm) is not instance of ArrayBuffer, Buffer, TypedArray, or DataView.
+```
+
+The suite runs in a jsdom environment, so typed arrays it creates belong to the
+jsdom realm. `src/crypto.ts` passed raw `.buffer` values to WebCrypto; Node 20's
+implementation rejects a foreign-realm `ArrayBuffer` for `Pbkdf2Params.salt`,
+while accepting typed-array *views* (the spec-valid `BufferSource`). This had been
+failing on `main` since 2026-07-28 — CI runs two Node versions and only one is
+shown as red at a glance.
+
+*Fix:* pass typed-array views (`salt`, `iv`, `data`) instead of `.buffer`, and type
+`base64ToUint8Array()` as `Uint8Array<ArrayBuffer>` so the value satisfies TS's
+`BufferSource`. A regression test now exercises the cross-realm path.
+
+### 8. Time-dependent unit test
 
 `getExpiredDeletes` fixtures used fixed July 2026 dates: once the wall clock passed
 2026-07-27 the "recent" delete counted as expired and `npm test` failed. Fixtures

@@ -42,7 +42,7 @@ export async function encrypt(plaintext: string, passphrase: string): Promise<En
 
     const salt = new Uint8Array(crypto.getRandomValues(new Uint8Array(16)));
     const key = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 600000, hash: 'SHA-256' },
+        { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
         keyMaterial,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -52,7 +52,7 @@ export async function encrypt(plaintext: string, passphrase: string): Promise<En
     // Encrypt with AES-GCM
     const iv = new Uint8Array(crypto.getRandomValues(new Uint8Array(12)));
     const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
+        { name: 'AES-GCM', iv },
         key,
         enc.encode(plaintext),
     );
@@ -86,7 +86,7 @@ export async function decrypt(encrypted: EncryptedToken, passphrase: string): Pr
 
     const salt = base64ToUint8Array(encrypted.salt);
     const key = await crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 600000, hash: 'SHA-256' },
+        { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
         keyMaterial,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -98,11 +98,7 @@ export async function decrypt(encrypted: EncryptedToken, passphrase: string): Pr
     const data = base64ToUint8Array(encrypted.data);
 
     try {
-        const decrypted = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: iv.buffer as ArrayBuffer },
-            key,
-            data.buffer as ArrayBuffer,
-        );
+        const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
         return new TextDecoder().decode(decrypted);
     } catch {
         throw new Error('Decryption failed — wrong passphrase or corrupted data');
@@ -119,7 +115,9 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
-function base64ToUint8Array(base64: string): Uint8Array {
+// Returns a view over a plain ArrayBuffer (not ArrayBufferLike) so it can be
+// passed straight to WebCrypto as a BufferSource.
+function base64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {

@@ -147,3 +147,55 @@ describe('clearStoredToken', () => {
         expect(hasStoredToken()).toBe(false);
     });
 });
+
+// ─── Cross-realm BufferSource compatibility ────────────────────────────────
+
+describe('encrypt / decrypt — BufferSource handling', () => {
+    // Regression guard: passing a raw `.buffer` to WebCrypto fails under
+    // Node 20 when the typed array came from another realm (jsdom here),
+    // because the ArrayBuffer is not recognised as a valid BufferSource.
+    // The implementation must pass typed-array views instead.
+    it('accepts typed-array views as WebCrypto BufferSources', async () => {
+        const salt = new Uint8Array(16);
+        crypto.getRandomValues(salt);
+        const iv = new Uint8Array(12);
+        crypto.getRandomValues(iv);
+
+        const keyMaterial = await crypto.subtle.importKey(
+            'raw',
+            new TextEncoder().encode('passphrase'),
+            'PBKDF2',
+            false,
+            ['deriveKey'],
+        );
+
+        // Views (not `.buffer`) must be accepted for salt…
+        const key = await crypto.subtle.deriveKey(
+            { name: 'PBKDF2', salt, iterations: 1000, hash: 'SHA-256' },
+            keyMaterial,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt'],
+        );
+
+        // …and for iv / data.
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv },
+            key,
+            new TextEncoder().encode('hello'),
+        );
+        const plaintext = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv },
+            key,
+            new Uint8Array(ciphertext),
+        );
+
+        expect(new TextDecoder().decode(plaintext)).toBe('hello');
+    });
+
+    it('round-trips a token through localStorage without realm issues', async () => {
+        localStorage.clear();
+        await storeToken('ghp_cross_realm_token', 'a passphrase');
+        expect(await retrieveToken('a passphrase')).toBe('ghp_cross_realm_token');
+    });
+});
