@@ -5,4 +5,4 @@
  * such as export manifests can report the version that produced them.
  */
 
-export const LIBRARY_VERSION = '1.4.0';
+export const LIBRARY_VERSION = '1.4.1';
