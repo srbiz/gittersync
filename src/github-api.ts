@@ -302,6 +302,38 @@ export class GitHubApiAdapter {
         }
     }
 
+    /**
+     * List every file below `path`, recursively.
+     *
+     * `listDirectory()` only returns direct children, so it misses files stored
+     * in subfolders (e.g. `files/<taskId>/<name>.png`, the layout used by the
+     * demo app). Paths are returned relative to `path`.
+     */
+    async listDirectoryRecursive(path: string): Promise<string[]> {
+        this.ensureInitialized();
+
+        try {
+            const { data } = await this.octokit!.git.getTree({
+                owner: this.config.owner,
+                repo: this.config.repo,
+                tree_sha: this.config.branch,
+                recursive: 'true',
+            });
+
+            const prefix = path.endsWith('/') ? path : `${path}/`;
+
+            return (data.tree ?? [])
+                .filter(
+                    (entry): entry is typeof entry & { path: string } =>
+                        entry.type === 'blob' && !!entry.path && entry.path.startsWith(prefix),
+                )
+                .map((entry) => entry.path.slice(prefix.length));
+        } catch (error: any) {
+            if (error.status === 404) return [];
+            throw error;
+        }
+    }
+
     // ─── Binary File Operations ─────────────────────────────────────────
 
     /**

@@ -29,6 +29,7 @@ import type {
     FileRef,
 } from './types';
 import { ConflictError, AuthError, ValidationError } from './types';
+import { LIBRARY_VERSION } from './version';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
@@ -149,12 +150,29 @@ export class GitHubSyncService {
         const metaResult = await this.api.fetchJsonFile<MetaFile>('meta.json');
         const meta = metaResult?.content as MetaFile | null;
 
-        // 2. Determine which collections exist
-        const collectionNames = meta
+        // 2. Determine which collections exist. Data may live only in
+        // changelog entries (nothing has been compacted yet), so the changelog
+        // directory is consulted too — otherwise a fresh device would pull
+        // nothing at all and never even establish a sync cursor.
+        const changelogFiles = await this.api.listDirectory('changelog');
+
+        let collectionNames = meta
             ? Object.keys(meta.collections)
             : await this.guessCollectionNames();
 
-        if (collectionNames.length === 0) {
+        if (collectionNames.length === 0 && changelogFiles.length > 0) {
+            const seen = new Set<string>();
+            for (const filename of changelogFiles) {
+                const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
+                const changelog = result?.content as ChangelogFile | undefined;
+                for (const change of changelog?.changes ?? []) {
+                    if (change.collection) seen.add(change.collection);
+                }
+            }
+            collectionNames = [...seen];
+        }
+
+        if (collectionNames.length === 0 && changelogFiles.length === 0) {
             // Empty repo — nothing to pull
             return { type: 'none' };
         }
@@ -179,7 +197,6 @@ export class GitHubSyncService {
         await this.runMigrations(meta, collections);
 
         // 5. Apply changelog entries that are newer than the collection files
-        const changelogFiles = await this.api.listDirectory('changelog');
         const changelogs: ChangelogFile[] = [];
         for (const filename of changelogFiles) {
             const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
@@ -610,9 +627,10 @@ export class GitHubSyncService {
             }
         }
 
-        // 5. Fetch binary files
+        // 5. Fetch binary files — recursive, because attachments may live in
+        // subfolders (e.g. `files/<taskId>/<name>.png`).
         let fileCount = 0;
-        const binaryFiles = await this.api.listDirectory('files');
+        const binaryFiles = await this.api.listDirectoryRecursive('files');
         for (const fileName of binaryFiles) {
             try {
                 const blob = await this.api.downloadBinaryFile(`files/${fileName}`);
@@ -626,15 +644,17 @@ export class GitHubSyncService {
         // 6. Create manifest
         const manifest: ExportManifest = {
             exportedAt: new Date().toISOString(),
-            sourceVersion: '1.3.1',
+            sourceVersion: LIBRARY_VERSION,
             collections: collectionNames,
             changelogCount,
             fileCount,
         };
         folder.file('manifest.json', JSON.stringify(manifest, null, 2));
 
-        // 7. Generate ZIP blob
-        return folder.generateAsync({ type: 'blob' });
+        // 7. Generate the ZIP from the root: JSZip strips the folder prefix when
+        // generating from a folder object, which would drop the documented
+        // `gittersync-export/` structure.
+        return zip.generateAsync({ type: 'blob' });
     }
 
     /**
@@ -927,7 +947,39 @@ export class GitHubSyncService {
                     }
                 } else if (change.op === 'update') {
                     const existing = await this.localDb.getDocument(collectionName, change.docId);
-                    if (!existing) continue;
+
+                    if (!existing) {
+                        // Upsert: an update for an unknown document still carries
+                        // data (the create may not have reached this device yet).
+                        const newData: Record<string, unknown> = {};
+                        const newFields: Record<string, { updatedAt: string; device: string }> = {};
+
+                        for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
+                            newData[fieldName] = fieldData.value;
+                            newFields[fieldName] = {
+                                updatedAt: fieldData.updatedAt,
+                                device: deviceId,
+                            };
+                        }
+
+                        const firstFieldTime =
+                            Object.values(newFields)[0]?.updatedAt || new Date().toISOString();
+
+                        await this.localDb.putDocument(
+                            collectionName,
+                            {
+                                id: change.docId,
+                                data: newData,
+                                _fields: newFields,
+                                updated_at: firstFieldTime,
+                                created_at: firstFieldTime,
+                                deleted_at: null,
+                                deleted_by: null,
+                            },
+                            false,
+                        );
+                        continue;
+                    }
 
                     const updatedData = { ...(existing.data as Record<string, unknown>) };
                     const updatedFields = { ...existing._fields };
@@ -961,7 +1013,26 @@ export class GitHubSyncService {
                     await this.localDb.putDocument(collectionName, mergedDoc, false);
                 } else if (change.op === 'delete') {
                     const existing = await this.localDb.getDocument(collectionName, change.docId);
-                    if (!existing) continue;
+
+                    if (!existing) {
+                        // Unknown document (created and deleted before this device
+                        // saw it) — record a tombstone so the delete is not lost.
+                        const deletedAt = change.deletedAt || new Date().toISOString();
+                        await this.localDb.putDocument(
+                            collectionName,
+                            {
+                                id: change.docId,
+                                data: {},
+                                _fields: {},
+                                updated_at: deletedAt,
+                                created_at: deletedAt,
+                                deleted_at: deletedAt,
+                                deleted_by: deviceId,
+                            },
+                            false,
+                        );
+                        continue;
+                    }
 
                     // Only apply delete if it's newer than the last edit
                     if (

@@ -464,7 +464,17 @@ export GITTERSYNC_TEST_TOKEN="ghp_your_token_here"
 npm run test:integration
 ```
 
-See [`tests/integration/README.md`](tests/integration/README.md) for details.
+By default a temporary `gittersync-test-*` repository is created and deleted per run. If your token cannot create repositories (GitHub App installations or fine-grained tokens scoped to one repo), point the suite at an existing repository instead — a disposable `gittersync-e2e-*` scratch branch is created off its default branch and deleted afterwards:
+
+```bash
+export GITTERSYNC_TEST_TOKEN="ghp_your_token_here"
+export GITTERSYNC_TEST_REPO="your-user/your-scratch-repo"
+npm run test:integration
+```
+
+See [`tests/integration/README.md`](tests/integration/README.md) for details, including the end-to-end flows covered by `tests/integration/e2e.test.ts`.
+
+The most recent full-flow verification run, the defects it uncovered and their fixes are recorded in [`docs/e2e-verification.md`](docs/e2e-verification.md).
 
 ## Architecture Plan
 

@@ -223,12 +223,51 @@ export function applyChangelogToCollection<T = Record<string, unknown>>(
                 deleted_by: null,
             };
         } else if (change.op === 'update') {
-            if (!existing) continue; // Can't update a non-existent document
+            // An update for a document we have never seen is still valid data:
+            // the creating side may have batched it as 'update' (e.g. putDocument)
+            // or the create may live in a changelog this device has not read yet.
+            // Treat it as an upsert so the change is never silently dropped.
+            if (!existing) {
+                const newData: Record<string, unknown> = {};
+                const newFields: FieldsMap = {};
+
+                for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
+                    newData[fieldName] = fieldData.value;
+                    newFields[fieldName] = {
+                        updatedAt: fieldData.updatedAt,
+                        device: deviceId,
+                    };
+                }
+
+                const firstFieldTime =
+                    Object.values(newFields)[0]?.updatedAt || new Date().toISOString();
+
+                docs[change.docId] = {
+                    id: change.docId,
+                    data: newData as T,
+                    _fields: newFields,
+                    updated_at: firstFieldTime,
+                    created_at: firstFieldTime,
+                    deleted_at: null,
+                    deleted_by: null,
+                };
+                continue;
+            }
 
             const updatedData = { ...(existing.data as Record<string, unknown>) };
             const updatedFields = { ...existing._fields };
 
             for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
+                const current = updatedFields[fieldName];
+                const incomingTime = new Date(fieldData.updatedAt).getTime();
+                const currentTime = current ? new Date(current.updatedAt).getTime() : -Infinity;
+
+                // Field-level LWW, matching the local apply path. Changelog
+                // entries carry *every* field of a document (putDocument echoes
+                // them all), so without this guard a stale echo could roll back
+                // a newer value and re-attribute its provenance.
+                if (current && incomingTime <= currentTime) continue;
+
                 updatedData[fieldName] = fieldData.value;
                 updatedFields[fieldName] = {
                     updatedAt: fieldData.updatedAt,
@@ -249,11 +288,27 @@ export function applyChangelogToCollection<T = Record<string, unknown>>(
                 updated_at: new Date(maxTimestamp).toISOString(),
             };
         } else if (change.op === 'delete') {
-            if (!existing) continue; // Can't delete a non-existent document
+            const deletedAt = change.deletedAt || new Date().toISOString();
+
+            if (!existing) {
+                // The document is unknown here (created and deleted before this
+                // device ever saw it). Record a tombstone so the deletion is not
+                // lost and the document cannot be resurrected by an older copy.
+                docs[change.docId] = {
+                    id: change.docId,
+                    data: {} as T,
+                    _fields: {},
+                    updated_at: deletedAt,
+                    created_at: deletedAt,
+                    deleted_at: deletedAt,
+                    deleted_by: deviceId,
+                };
+                continue;
+            }
 
             docs[change.docId] = {
                 ...existing,
-                deleted_at: change.deletedAt || new Date().toISOString(),
+                deleted_at: deletedAt,
                 deleted_by: deviceId,
             };
         }

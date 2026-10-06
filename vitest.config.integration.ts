@@ -5,6 +5,8 @@ export default defineConfig({
         globals: true,
         environment: 'jsdom',
         include: ['tests/integration/**/*.test.ts'],
+        // jsdom has no IndexedDB — polyfill it before any module is imported
+        setupFiles: ['./tests/integration/setup-env.ts'],
         testTimeout: 30_000,
         hookTimeout: 60_000,
         // No coverage for integration tests — they're slow and test real API

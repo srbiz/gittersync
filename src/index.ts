@@ -32,6 +32,9 @@ export type {
 
 export { ConflictError, RateLimitError, AuthError, ValidationError } from './types';
 
+// Version
+export { LIBRARY_VERSION } from './version';
+
 // Merge algorithms
 export {
     mergeDocument,
