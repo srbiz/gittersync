@@ -1,169 +1,269 @@
 /**
  * Task Detail View — Modal for creating/editing a task
+ *
+ * Everything is looked up relative to this dialog's own overlay (never
+ * `document.getElementById`), only one dialog can be open at a time, and
+ * `close()` disposes the label editor + listeners so labels added in this
+ * session are dismissed instead of leaking into the next dialog.
  */
 
-import type { Task, ColumnId, Priority, Label } from '../types';
+import type { Task, ColumnId, Priority, TaskAttachment } from '../types';
 import { createTask, updateTask, uploadAttachment } from '../gittersync-adapter';
-import { generateId } from '../main';
 import { renderFileAttachments } from '../components/file-attachment';
+import { createLabelEditor, type LabelEditor } from '../components/label-editor';
+import { showMessage } from '../state';
+
+/** GitHub's Contents API accepts at most 1 MiB per file */
+const MAX_ATTACHMENT_BYTES = 1024 * 1024;
+
+const PRIORITY_OPTIONS: Priority[] = ['low', 'medium', 'high', 'critical'];
+
+/** Currently open dialog, so a second one replaces it instead of stacking. */
+let openDialog: { close: () => void } | null = null;
 
 export function renderTaskDetail(task: Task, columnId: ColumnId, isNew = false): void {
+    // Dismiss any dialog still on screen (its unsaved labels go with it)
+    openDialog?.close();
+
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
-
-    const priorityOptions = ['low', 'medium', 'high', 'critical'].map(p =>
-        `<option value="${p}" ${task.priority === p ? 'selected' : ''}>${p.charAt(0).toUpperCase() + p.slice(1)}</option>`
-    ).join('');
-
-    const labels = task.labels || [];
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', isNew ? 'New task' : 'Edit task');
 
     overlay.innerHTML = `
         <div class="modal">
             <div class="modal-header">
                 <h2>${isNew ? 'New Task' : 'Edit Task'}</h2>
-                <button class="btn-icon" data-action="close">✕</button>
+                <button type="button" class="btn-icon" data-action="close" aria-label="Close dialog">✕</button>
             </div>
-            <form id="task-form">
+            <form id="task-form" novalidate>
                 <div class="form-group">
                     <label for="task-title">Title *</label>
-                    <input type="text" id="task-title" value="${escapeHtml(task.title)}" required placeholder="What needs to be done?">
+                    <input type="text" id="task-title" required maxlength="120" placeholder="What needs to be done?">
                 </div>
                 <div class="form-group">
                     <label for="task-desc">Description</label>
-                    <textarea id="task-desc" placeholder="Add more details…">${escapeHtml(task.description)}</textarea>
+                    <textarea id="task-desc" rows="3" placeholder="Add more details…"></textarea>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label for="task-priority">Priority</label>
-                        <select id="task-priority">${priorityOptions}</select>
+                        <select id="task-priority"></select>
                     </div>
                     <div class="form-group">
                         <label for="task-assignee">Assignee</label>
-                        <input type="text" id="task-assignee" value="${escapeHtml(task.assignee)}" placeholder="GitHub username">
+                        <input type="text" id="task-assignee" maxlength="60" placeholder="GitHub username">
                     </div>
                 </div>
                 <div class="form-row">
                     <div class="form-group">
                         <label for="task-due">Due Date</label>
-                        <input type="date" id="task-due" value="${task.dueDate ? task.dueDate.split('T')[0] : ''}">
+                        <input type="date" id="task-due">
                     </div>
                     <div class="form-group">
-                        <label>Labels</label>
-                        <div style="display:flex;gap:0.5rem">
-                            <input type="text" id="label-input" placeholder="Type label + Enter" style="flex:1">
-                            <input type="color" id="label-color" value="#3b82f6" style="width:40px;padding:0.25rem">
-                        </div>
-                        <div id="labels-container" style="display:flex;flex-wrap:wrap;gap:0.25rem;margin-top:0.5rem">
-                            ${labels.map(l => `<span class="task-label" style="background:${l.color}20;color:${l.color};cursor:pointer" data-label-id="${l.id}">${l.text} ✕</span>`).join('')}
-                        </div>
+                        <label id="task-labels-label">Labels</label>
+                        <div data-slot="labels" aria-labelledby="task-labels-label"></div>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label>Attachments</label>
+                    <label for="file-upload">Attachments</label>
                     <input type="file" id="file-upload" multiple>
-                    <div id="attachments-container"></div>
+                    <small class="form-hint" data-slot="file-hint">Max 1 MB per file — stored in the repo under files/&lt;task&gt;/</small>
+                    <div data-slot="attachments"></div>
                 </div>
             </form>
             <div class="modal-footer">
                 <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
-                <button type="submit" class="btn-primary" form="task-form">${isNew ? 'Create' : 'Save'}</button>
+                <button type="submit" class="btn-primary" form="task-form" data-action="save">
+                    ${isNew ? 'Create' : 'Save'}
+                </button>
             </div>
         </div>
     `;
 
     document.body.appendChild(overlay);
 
-    const close = () => overlay.remove();
-    overlay.querySelector('[data-action="close"]')?.addEventListener('click', close);
-    overlay.querySelector('[data-action="cancel"]')?.addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    // ─── Scoped lookups ──────────────────────────────────────────────────
 
-    const labelInput = document.getElementById('label-input') as HTMLInputElement;
-    const labelColor = document.getElementById('label-color') as HTMLInputElement;
-    const labelsContainer = document.getElementById('labels-container')!;
+    const form = overlay.querySelector<HTMLFormElement>('#task-form')!;
+    const titleInput = overlay.querySelector<HTMLInputElement>('#task-title')!;
+    const descInput = overlay.querySelector<HTMLTextAreaElement>('#task-desc')!;
+    const prioritySelect = overlay.querySelector<HTMLSelectElement>('#task-priority')!;
+    const assigneeInput = overlay.querySelector<HTMLInputElement>('#task-assignee')!;
+    const dueInput = overlay.querySelector<HTMLInputElement>('#task-due')!;
+    const fileInput = overlay.querySelector<HTMLInputElement>('#file-upload')!;
+    const labelsSlot = overlay.querySelector<HTMLElement>('[data-slot="labels"]')!;
+    const attachmentsSlot = overlay.querySelector<HTMLElement>('[data-slot="attachments"]')!;
+    const saveButton = overlay.querySelector<HTMLButtonElement>('[data-action="save"]')!;
+    const fileHint = overlay.querySelector<HTMLElement>('[data-slot="file-hint"]')!;
 
-    labelInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            const text = labelInput.value.trim();
-            if (!text) return;
-            const newLabel: Label = { id: generateId(), text, color: labelColor.value };
-            const span = document.createElement('span');
-            span.className = 'task-label';
-            span.style.cssText = `background:${newLabel.color}20;color:${newLabel.color};cursor:pointer`;
-            span.textContent = `${newLabel.text} ✕`;
-            span.dataset.labelId = newLabel.id;
-            span.addEventListener('click', () => span.remove());
-            labelsContainer.appendChild(span);
-            labelInput.value = '';
+    // ─── Initial values (assigned via the DOM, never interpolated) ────────
+
+    for (const priority of PRIORITY_OPTIONS) {
+        const option = document.createElement('option');
+        option.value = priority;
+        option.textContent = priority.charAt(0).toUpperCase() + priority.slice(1);
+        option.selected = task.priority === priority;
+        prioritySelect.appendChild(option);
+    }
+
+    titleInput.value = task.title ?? '';
+    descInput.value = task.description ?? '';
+    assigneeInput.value = task.assignee ?? '';
+    dueInput.value = task.dueDate ? task.dueDate.slice(0, 10) : '';
+
+    // ─── Labels ──────────────────────────────────────────────────────────
+
+    const labelEditor: LabelEditor = createLabelEditor({
+        initial: task.labels ?? [],
+        onRemove: (label) => showMessage('info', `Removed label “${label.text}” (save to keep)`, 2000),
+    });
+    labelsSlot.appendChild(labelEditor.element);
+
+    // ─── Attachments ─────────────────────────────────────────────────────
+
+    let attachments: TaskAttachment[] = [...(task.attachments ?? [])];
+    renderFileAttachments(attachmentsSlot, { ...task, attachments });
+
+    fileInput.addEventListener('change', () => {
+        const selected = Array.from(fileInput.files ?? []);
+        const oversized = selected.filter((file) => file.size > MAX_ATTACHMENT_BYTES);
+        if (oversized.length > 0) {
+            fileHint.textContent = `Too large (max 1 MB): ${oversized
+                .map((file) => file.name)
+                .join(', ')}`;
+            fileHint.classList.add('form-hint-error');
+        } else if (selected.length > 0) {
+            fileHint.textContent = `${selected.length} file(s) ready to upload`;
+            fileHint.classList.remove('form-hint-error');
+        } else {
+            fileHint.textContent = 'Max 1 MB per file — stored in the repo under files/<task>/';
+            fileHint.classList.remove('form-hint-error');
         }
     });
 
-    const fileInput = document.getElementById('file-upload') as HTMLInputElement;
-    const attachmentsContainer = document.getElementById('attachments-container')!;
-    renderFileAttachments(attachmentsContainer, task);
+    // ─── Close handling ──────────────────────────────────────────────────
 
-    const form = document.getElementById('task-form')!;
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
+    let closed = false;
 
-        const title = (document.getElementById('task-title') as HTMLInputElement).value.trim();
-        if (!title) return;
+    const close = (): void => {
+        if (closed) return;
+        closed = true;
 
-        const currentLabels: Label[] = [];
-        labelsContainer.querySelectorAll('[data-label-id]').forEach(el => {
-            const span = el as HTMLElement;
-            currentLabels.push({
-                id: span.dataset.labelId!,
-                text: span.textContent?.replace(' ✕', '') || '',
-                color: span.style.color,
-            });
-        });
+        if (openDialog?.close === close) openDialog = null;
 
-        const updatedTask: Task = {
+        // Dismiss labels added in this session and detach chip listeners
+        labelEditor.destroy();
+        document.removeEventListener('keydown', onKeydown, true);
+        overlay.remove();
+    };
+
+    const onKeydown = (event: KeyboardEvent): void => {
+        if (event.key === 'Escape' && !closed) {
+            event.preventDefault();
+            close();
+        }
+    };
+
+    overlay.querySelector('[data-action="close"]')?.addEventListener('click', close);
+    overlay.querySelector('[data-action="cancel"]')?.addEventListener('click', close);
+    overlay.addEventListener('click', (event) => {
+        // Clicking the backdrop (but not the modal itself) closes the dialog
+        if (event.target === overlay) close();
+    });
+    document.addEventListener('keydown', onKeydown, true);
+
+    openDialog = { close };
+
+    // ─── Submit ──────────────────────────────────────────────────────────
+
+    let saving = false;
+
+    const setBusy = (busy: boolean): void => {
+        saving = busy;
+        saveButton.disabled = busy;
+        overlay.querySelector<HTMLButtonElement>('[data-action="cancel"]')!.disabled = busy;
+        saveButton.textContent = busy ? 'Saving…' : isNew ? 'Create' : 'Save';
+    };
+
+    form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (saving || closed) return;
+
+        const title = titleInput.value.trim();
+        if (!title) {
+            showMessage('error', 'A title is required');
+            titleInput.focus();
+            return;
+        }
+
+        const selectedFiles = Array.from(fileInput.files ?? []).filter(
+            (file) => file.size <= MAX_ATTACHMENT_BYTES,
+        );
+
+        const draft: Task = {
             ...task,
             title,
-            description: (document.getElementById('task-desc') as HTMLTextAreaElement).value.trim(),
-            priority: (document.getElementById('task-priority') as HTMLSelectElement).value as Priority,
-            assignee: (document.getElementById('task-assignee') as HTMLInputElement).value.trim(),
-            dueDate: (document.getElementById('task-due') as HTMLInputElement).value || '',
-            labels: currentLabels,
+            description: descInput.value.trim(),
+            priority: prioritySelect.value as Priority,
+            assignee: assigneeInput.value.trim(),
+            dueDate: dueInput.value ? new Date(`${dueInput.value}T00:00:00`).toISOString() : '',
+            labels: labelEditor.getLabels(),
+            columnId: isNew ? columnId : task.columnId,
+            attachments: [...attachments],
             updatedAt: new Date().toISOString(),
         };
 
-        const filePromises: Promise<void>[] = [];
-        if (fileInput.files) {
-            for (let i = 0; i < fileInput.files.length; i++) {
-                const file = fileInput.files[i];
-                filePromises.push(
-                    (async () => {
-                        try {
-                            const att = await uploadAttachment(updatedTask, file);
-                            if (att) updatedTask.attachments.push(att);
-                        } catch (err) {
-                            console.error('Upload failed:', err);
-                        }
-                    })()
-                );
+        setBusy(true);
+
+        try {
+            // Files-first ordering: the document must exist before an attachment
+            // can be referenced by it.
+            if (isNew) {
+                await createTask(draft, columnId);
             }
-        }
 
-        if (isNew) {
-            await createTask(updatedTask, columnId);
-        } else {
-            await updateTask(updatedTask);
-        }
+            let current = draft;
+            for (const file of selectedFiles) {
+                const attachment = await uploadAttachment(current, file);
+                if (attachment) {
+                    current = {
+                        ...current,
+                        attachments: [...current.attachments, attachment],
+                    };
+                } else {
+                    showMessage('error', `Upload failed: ${file.name}`, 4000);
+                }
+            }
 
-        if (filePromises.length > 0) {
-            await Promise.all(filePromises);
-        }
+            if (!isNew) {
+                await updateTask(current);
+            }
 
-        close();
+            attachments = current.attachments;
+            showMessage('success', isNew ? 'Task created' : 'Task saved', 2500);
+            close();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            showMessage('error', `Could not save the task: ${message}`, 6000);
+            setBusy(false);
+        }
     });
+
+    // ─── Focus ───────────────────────────────────────────────────────────
+
+    if (isNew) {
+        titleInput.focus();
+    } else {
+        // Editing: put the caret at the end of the title instead of selecting it
+        titleInput.focus();
+        titleInput.setSelectionRange(titleInput.value.length, titleInput.value.length);
+    }
 }
 
-function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+/** Close the dialog if one is open — used by board re-renders and shortcuts. */
+export function closeTaskDetail(): void {
+    openDialog?.close();
+    openDialog = null;
 }

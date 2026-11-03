@@ -250,7 +250,7 @@ describe('LocalDB — deleteDocument', () => {
     });
 
     it('is a no-op for non-existent document', async () => {
-        await expect(db.deleteDocument('users', 'nonexistent')).resolves.toBeUndefined();
+        await expect(db.deleteDocument('users', 'nonexistent')).resolves.toBe(false);
     });
 
     it('queues a delete changelog entry', async () => {

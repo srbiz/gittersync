@@ -6,12 +6,27 @@ import { getState, subscribe, showMessage } from '../state';
 import { pushChanges, pullChanges, fullSync, compact, getFullStatus, exportData, importData } from '../gittersync-adapter';
 import { showHelpDialog } from '../components/help-dialog';
 
+/** How many reads avoided the REST API since the page loaded. */
+function rateLimitInfo(): string {
+    const info = getState().sync?.getRateLimitInfo?.();
+    if (!info) return 'Unknown';
+    const saved = info.rawReads + info.rawMisses;
+    return `${saved} free · ${info.apiCalls} API`;
+}
+
 let panel: HTMLElement | null = null;
+let unsubscribePanel: (() => void) | null = null;
+
+function closeStatusPanel(): void {
+    unsubscribePanel?.();
+    unsubscribePanel = null;
+    panel?.remove();
+    panel = null;
+}
 
 export function showStatusPanel(): void {
     if (panel) {
-        panel.remove();
-        panel = null;
+        closeStatusPanel();
         return;
     }
 
@@ -61,6 +76,10 @@ export function showStatusPanel(): void {
                     <span class="value">${state.rateLimitRemaining !== null ? `${state.rateLimitRemaining} remaining` : 'Unknown'}</span>
                 </div>
                 <div class="status-item">
+                    <span class="label">Raw Reads</span>
+                    <span class="value" title="Reads served by raw.githubusercontent.com — these do not use the GitHub API rate limit">${rateLimitInfo()}</span>
+                </div>
+                <div class="status-item">
                     <span class="label">Repo Size</span>
                     <span class="value">${state.repoSizeKb !== null ? `${state.repoSizeKb} KB` : 'Unknown'}</span>
                 </div>
@@ -89,8 +108,7 @@ export function showStatusPanel(): void {
         });
 
         panel.querySelector('[data-action="close"]')?.addEventListener('click', () => {
-            panel?.remove();
-            panel = null;
+            closeStatusPanel();
         });
 
         panel.querySelector('[data-action="pull"]')?.addEventListener('click', async () => {
@@ -136,7 +154,9 @@ export function showStatusPanel(): void {
         });
     };
 
-    subscribe(render);
+    // Without this unsubscribe, every open added another listener that
+    // re-rendered the panel and re-bound its buttons.
+    unsubscribePanel = subscribe(render);
     render();
     getFullStatus();
 }

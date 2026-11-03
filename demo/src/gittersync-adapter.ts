@@ -54,13 +54,20 @@ export async function initializeSync(config: AppConfig, token: string): Promise<
         repo: config.repo,
         branch: config.branch,
         compactionThreshold: 20,
+        // Raw reads (raw.githubusercontent.com) keep the demo well inside the
+        // hourly GitHub API budget — attachments and collection files never
+        // touch the REST API unless raw content is unavailable.
+        useRawContent: true,
         onSyncStatusChange: (status: SyncStatus) => {
             setState({
                 syncing: status.isSyncing,
                 online: status.isOnline,
                 pendingChanges: status.pendingChanges ?? 0,
-                deviceId: status.deviceId,
+                deviceId: status.deviceId || null,
                 cursor: status.cursor?.sha ?? null,
+                lastSyncAt: status.lastSyncAt ?? getState().lastSyncAt,
+                rateLimitRemaining: status.rateLimitRemaining ?? getState().rateLimitRemaining,
+                repoSizeKb: status.repoSizeKb ?? getState().repoSizeKb,
             });
         },
     });
@@ -176,29 +183,35 @@ export async function moveTaskToColumn(taskId: string, fromColumn: ColumnId, toC
     const doc = await localDb.getDocument<Record<string, unknown>>(`column_${fromColumn}`, taskId);
     if (!doc) return;
 
-    // Update the columnId field
-    const updatedData = { ...doc.data as Record<string, unknown>, columnId: toColumn };
-    const updatedFields = {
+    const now = new Date().toISOString();
+
+    // Only the fields that actually move get a new timestamp, so a concurrent
+    // edit of the title on another device still wins on merge.
+    const movedData = { ...doc.data as Record<string, unknown>, columnId: toColumn };
+    const movedFields = {
         ...doc._fields,
-        columnId: {
-            updatedAt: new Date().toISOString(),
-            device: localDb.getDeviceId(),
-        },
+        columnId: { updatedAt: now, device: localDb.getDeviceId() },
+        position: { updatedAt: now, device: localDb.getDeviceId() },
     };
 
-    // Soft-delete from source
-    await localDb.deleteDocument(`column_${fromColumn}`, taskId);
-
-    // Create in target
-    const newDoc: SyncedDocument = {
+    const movedDoc: SyncedDocument = {
         ...doc,
-        data: updatedData,
-        _fields: updatedFields,
+        data: movedData,
+        _fields: movedFields,
+        updated_at: now,
         deleted_at: null,
         deleted_by: null,
     };
 
-    await localDb.createDocument(`column_${toColumn}`, newDoc);
+    // Soft-delete from source, then upsert into the target (a repeated drop
+    // must not fail on a duplicate key)
+    await localDb.deleteDocument(`column_${fromColumn}`, taskId);
+    const existingInTarget = await localDb.getDocument(`column_${toColumn}`, taskId);
+    if (existingInTarget) {
+        await localDb.putDocument(`column_${toColumn}`, movedDoc);
+    } else {
+        await localDb.createDocument(`column_${toColumn}`, movedDoc);
+    }
     await loadFromLocalDb();
 }
 
@@ -259,17 +272,23 @@ export async function uploadAttachment(task: Task, file: File): Promise<TaskAtta
     const sync = syncService;
     if (!sync) return null;
 
-    const base64Content = await fileToBase64(file);
     const filePath = `files/${task.id}/${file.name}`;
 
-    const fileRef = await sync.uploadFile(filePath, base64Content, `Upload ${file.name} for task ${task.id}`);
+    // uploadFile accepts a File/Blob directly — no manual base64 needed, and the
+    // library rejects anything above GitHub's 1 MiB Contents API limit.
+    const fileRef = await sync.uploadFile(
+        filePath,
+        file,
+        `Upload ${file.name} for task ${task.id}`,
+        file.type || undefined
+    );
 
     const attachment: TaskAttachment = {
-        id: crypto.randomUUID(),
+        id: generateAttachmentId(),
         name: file.name,
         path: fileRef.path,
-        mimeType: file.type,
-        size: file.size,
+        mimeType: fileRef.mimeType || file.type,
+        size: fileRef.size || file.size,
         uploadedAt: new Date().toISOString(),
     };
 
@@ -280,6 +299,12 @@ export async function uploadAttachment(task: Task, file: File): Promise<TaskAtta
 
     await updateTask(updatedTask);
     return attachment;
+}
+
+function generateAttachmentId(): string {
+    const cryptoApi = (globalThis as { crypto?: Crypto }).crypto;
+    if (cryptoApi?.randomUUID) return cryptoApi.randomUUID();
+    return `att-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export async function downloadAttachment(attachment: TaskAttachment): Promise<void> {
@@ -351,18 +376,4 @@ function parseJSON<T>(value: unknown, fallback: T): T {
         try { return JSON.parse(value) as T; } catch { return fallback; }
     }
     return fallback;
-}
-
-function fileToBase64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = reader.result as string;
-            // Remove data: URL prefix
-            const base64 = result.split(',')[1];
-            resolve(base64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
 }
