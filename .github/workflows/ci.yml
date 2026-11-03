@@ -41,3 +41,48 @@ jobs:
 
             - name: Test
               run: npm test
+
+    # The demos are part of the contract: they consume the library exactly the
+    # way an app does, so a breaking change shows up here before it ships.
+    demos:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+                  cache-dependency-path: |
+                      package-lock.json
+                      demo/package-lock.json
+                      demo-vue/package-lock.json
+
+            - name: Install root dependencies
+              run: npm ci
+
+            - name: Build library
+              run: npm run build
+
+            - name: Install kanban demo dependencies
+              working-directory: ./demo
+              run: npm ci
+
+            - name: Build kanban demo (tsc + vite)
+              working-directory: ./demo
+              run: npm run build
+
+            - name: Install todo demo dependencies
+              working-directory: ./demo-vue
+              run: npm ci
+
+            - name: Test todo demo (Pinia store + components)
+              working-directory: ./demo-vue
+              run: npm test
+
+            - name: Build todo demo (vue-tsc + vite)
+              working-directory: ./demo-vue
+              run: npm run build

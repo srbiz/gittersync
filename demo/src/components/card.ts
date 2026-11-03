@@ -5,6 +5,7 @@
 import type { Task, ColumnId } from '../types';
 import { renderTaskDetail } from '../views/task-detail';
 import { deleteTask } from '../gittersync-adapter';
+import { normalizeColor } from './label-editor';
 
 export function renderTaskCard(task: Task, columnId: ColumnId): HTMLElement {
     const card = document.createElement('div');
@@ -17,7 +18,10 @@ export function renderTaskCard(task: Task, columnId: ColumnId): HTMLElement {
     const priorityClass = `badge-${task.priority}`;
 
     const labelsHtml = (task.labels || [])
-        .map(l => `<span class="task-label" style="background:${l.color}20;color:${l.color}">${l.text}</span>`)
+        .map(l => {
+            const color = normalizeColor(l.color);
+            return `<span class="task-label" style="background:${color}22;color:${color}">${escapeHtml(l.text)}</span>`;
+        })
         .join('');
 
     const attachmentCount = (task.attachments || []).length;

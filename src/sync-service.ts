@@ -2,15 +2,19 @@
  * GitterSync — GitHub Sync Service
  *
  * The main orchestrator that coordinates:
- * - Pull from GitHub (full or incremental via Compare Commits API)
- * - Push local changes as changelog entries
+ * - Pull from GitHub (full, or incremental via the Compare Commits API)
+ * - Push of local changes as changelog entries
  * - Compaction of changelogs into collection files
  * - File upload/download with files-first ordering
  * - Field-level LWW merge using the merge module
+ *
+ * All public operations are serialised through an internal lock, so a manual
+ * `push()` can never interleave with an auto-sync cycle, and every operation
+ * reports how many GitHub REST API calls it consumed.
  */
 
 import JSZip from 'jszip';
-import { GitHubApiAdapter } from './github-api';
+import { GitHubApiAdapter, type ApiUsage as ApiUsageSnapshot } from './github-api';
 import { LocalDB } from './local-db';
 import { mergeDocument, applyChangelogToCollection, getExpiredDeletes } from './merge';
 import type {
@@ -18,69 +22,182 @@ import type {
     SyncStatus,
     SyncCursor,
     PullResult,
+    SyncResult,
+    PushResult,
+    CompactionResult,
+    RateLimitInfo,
     ChangelogEntry,
     ChangelogFile,
     CollectionFile,
     MetaFile,
-    MigrationStep,
     ExportManifest,
     SyncedDocument,
-    DeviceId,
+    UploadableContent,
     FileRef,
+    FetchFileOptions,
 } from './types';
-import { ConflictError, AuthError, ValidationError } from './types';
+import { ConflictError, RateLimitError, ValidationError } from './types';
+import {
+    resolveConfig,
+    assertValidCollectionName,
+    assertValidRepoPath,
+    DEFAULT_AUTO_SYNC_INTERVAL_MS,
+    type ResolvedGitHubSyncConfig,
+} from './config';
 import { LIBRARY_VERSION } from './version';
 
-// ─── Constants ─────────────────────────────────────────────────────────────
+// ─── Helpers ───────────────────────────────────────────────────────────────
 
-/** Default compaction threshold — compact when this many changelog files exist */
-const DEFAULT_COMPACTION_THRESHOLD = 20;
+/** MIME types inferred from a file extension during upload. */
+const MIME_TYPES: Record<string, string> = {
+    pdf: 'application/pdf',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    avif: 'image/avif',
+    bmp: 'image/bmp',
+    ico: 'image/x-icon',
+    txt: 'text/plain',
+    md: 'text/markdown',
+    json: 'application/json',
+    csv: 'text/csv',
+    zip: 'application/zip',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
 
-/** Default maximum retry attempts on 409 Conflict */
-const DEFAULT_MAX_RETRIES = 3;
+/**
+ * Convert an uploadable payload to base64 plus an exact byte size.
+ *
+ * Accepts a base64 string (the historical signature), a `Blob`/`File`, an
+ * `ArrayBuffer` or a `Uint8Array`, so browser code can pass a `File` straight
+ * from an `<input type="file">`.
+ */
+async function toBase64Payload(
+    input: UploadableContent,
+): Promise<{ base64: string; size: number }> {
+    if (typeof input === 'string') {
+        // Already base64 — strip an accidental data-URL prefix.
+        const base64 =
+            input.startsWith('data:') && input.includes(',')
+                ? input.slice(input.indexOf(',') + 1)
+                : input;
+        return { base64, size: base64ByteLength(base64) };
+    }
 
-/** Soft-delete purge age — 30 days in milliseconds */
-const PURGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+    let bytes: Uint8Array;
+    let size: number;
+
+    if (typeof Blob !== 'undefined' && input instanceof Blob) {
+        bytes = new Uint8Array(await input.arrayBuffer());
+        size = input.size;
+    } else if (input instanceof Uint8Array) {
+        bytes = input;
+        size = input.byteLength;
+    } else if (input instanceof ArrayBuffer) {
+        bytes = new Uint8Array(input);
+        size = input.byteLength;
+    } else {
+        throw new ValidationError('content', 'Unsupported upload payload type');
+    }
+
+    const nodeBuffer = (
+        globalThis as {
+            Buffer?: { from(bytes: Uint8Array): { toString(encoding: string): string } };
+        }
+    ).Buffer;
+
+    if (nodeBuffer) {
+        return { base64: nodeBuffer.from(bytes).toString('base64'), size };
+    }
+
+    if (typeof btoa !== 'function') {
+        throw new Error('Neither btoa nor Buffer is available to encode the upload');
+    }
+
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return { base64: btoa(binary), size };
+}
+
+/** Decoded byte length of a base64 string, accounting for padding. */
+function base64ByteLength(base64: string): number {
+    const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
 
 // ─── GitHubSyncService ─────────────────────────────────────────────────────
 
 /**
- * Main sync service — coordinates between the local database (Dexie)
+ * Main sync service — coordinates between the local database (Dexie/IndexedDB)
  * and the remote GitHub repository.
  *
- * Usage:
+ * @example
  * ```typescript
  * const sync = new GitHubSyncService({ owner: 'myuser', repo: 'my-app-db' })
  * await sync.init('ghp_xxxx')
- * await sync.registerCollections(['users', 'documents', 'cases'])
+ * await sync.registerCollections(['users', 'documents'])
+ *
  * const result = await sync.pull()
- * // ... user makes changes ...
+ * console.log(result.type, result.apiCalls)   // 'full' | 'incremental' | 'none'
+ *
+ * const db = sync.getLocalDb()
+ * const doc = createDocument('u1', { name: 'Alice' }, db.getDeviceId())
+ * await db.createDocument('users', doc)
+ *
  * await sync.push()
  * ```
  */
 export class GitHubSyncService {
     private api: GitHubApiAdapter;
     private localDb: LocalDB;
-    private config: Required<GitHubSyncConfig>;
-    private isSyncing = false;
-    private syncTimer: ReturnType<typeof setTimeout> | null = null;
+    private config: ResolvedGitHubSyncConfig;
+
+    /** Serialises pull/push/sync/compact so operations never interleave */
+    private lock: Promise<unknown> = Promise.resolve();
+    /** Synchronous claim counter — lets `sync()` refuse re-entrant calls */
+    private claimedOps = 0;
+    private syncingDepth = 0;
+    private isSyncingFlag = false;
+
+    private syncTimer: ReturnType<typeof setInterval> | null = null;
     private token: string | null = null;
-    private online = typeof navigator !== 'undefined' && navigator.onLine;
+    private initialized = false;
+    private online = typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
     private boundOnlineHandler: (() => void) | null = null;
     private boundOfflineHandler: (() => void) | null = null;
+    private autoSyncIntervalMs = DEFAULT_AUTO_SYNC_INTERVAL_MS;
 
+    /** Cached status values so `getStatus()` stays synchronous and cheap */
+    private cachedCursor: SyncCursor | null = null;
+    private cachedPendingChanges = 0;
+    private cachedDeviceId = '';
+    private cachedRepoSizeKb: number | null = null;
+    private lastSyncAt: string | null = null;
+    /** Skip auto-sync until this moment after a rate-limit error */
+    private rateLimitedUntil = 0;
+
+    /**
+     * @param config - Repository coordinates plus optional tuning. Unknown or
+     * missing options fall back to the documented defaults; invalid values throw
+     * a {@link ValidationError} immediately rather than failing mid-sync.
+     */
     constructor(config: GitHubSyncConfig) {
-        this.config = {
-            owner: config.owner,
-            repo: config.repo,
-            branch: config.branch ?? 'main',
-            compactionThreshold: config.compactionThreshold ?? DEFAULT_COMPACTION_THRESHOLD,
-            maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-            retryBaseDelay: config.retryBaseDelay ?? 1000,
-            onSyncStatusChange: config.onSyncStatusChange ?? (() => {}),
-            migrations: config.migrations ?? [],
-        };
-
+        this.config = resolveConfig(config);
         this.api = new GitHubApiAdapter(config);
         this.localDb = new LocalDB();
     }
@@ -90,7 +207,13 @@ export class GitHubSyncService {
     /**
      * Initialize the sync service with a GitHub token.
      *
-     * @param token - GitHub PAT or OAuth token
+     * Verifies repository access (1 REST call), opens the local IndexedDB and
+     * loads or generates this device's ID.
+     *
+     * @param token - GitHub PAT (classic `repo` scope) or OAuth token
+     * @returns `true` when both the remote and local sides are ready
+     * @throws {AuthError} When the token is rejected
+     * @throws {ValidationError} When the token is empty
      */
     async init(token: string): Promise<boolean> {
         this.token = token;
@@ -99,20 +222,35 @@ export class GitHubSyncService {
         await this.api.init(token);
 
         // Initialize local database
-        await this.localDb.init();
+        const deviceId = await this.localDb.init();
+        this.cachedDeviceId = deviceId ?? this.safeDeviceId();
 
+        this.initialized = true;
+        await this.refreshCachedStatus();
         this.emitStatus();
         return true;
     }
 
     /**
-     * Register collections that this app uses.
-     * Must be called after init() and before any read/write operations.
+     * Register the collections this app uses.
+     *
+     * Must be called after {@link init} and before any read/write operation on
+     * those collections. Registering twice is a no-op.
+     *
+     * @param names - Collection names. Each becomes `collections/<name>.json` in
+     * the repository and an IndexedDB table locally, so names are restricted to
+     * letters, digits, dots, underscores and hyphens.
+     * @throws {ValidationError} When a name is empty or contains unsafe characters
      */
     async registerCollections(names: string[]): Promise<void> {
+        if (!Array.isArray(names)) {
+            throw new ValidationError('names', 'registerCollections expects an array of names');
+        }
         for (const name of names) {
+            assertValidCollectionName(name);
             await this.localDb.registerCollection(name);
         }
+        await this.refreshCachedStatus();
     }
 
     // ─── Pull ───────────────────────────────────────────────────────────
@@ -120,24 +258,32 @@ export class GitHubSyncService {
     /**
      * Pull changes from GitHub.
      *
-     * - If no sync cursor exists: performs a full pull of all collection files.
-     * - If a sync cursor exists: uses Compare Commits API to detect changes,
-     *   then downloads only the changed files.
+     * - No sync cursor yet → full pull of every collection file and changelog.
+     * - Cursor present → Compare Commits API decides what changed, and only those
+     *   files are downloaded (through `raw.githubusercontent.com` when possible).
+     * - Cursor no longer resolvable (force-push, history rewrite) → the cursor is
+     *   discarded and a full pull runs, so remote changes are never skipped.
+     *
+     * @returns What was pulled plus the REST call count
      */
     async pull(): Promise<PullResult> {
         this.ensureInitialized();
-        this.setSyncing(true);
+        return this.withLock(() => this.pullInternal());
+    }
+
+    private async pullInternal(): Promise<PullResult> {
+        this.beginOp();
+        this.resetApiUsage();
 
         try {
             const cursor = await this.localDb.getSyncCursor();
+            const result = cursor ? await this.incrementalPull(cursor) : await this.fullPull();
 
-            if (!cursor) {
-                return await this.fullPull();
-            } else {
-                return await this.incrementalPull(cursor);
-            }
+            this.lastSyncAt = new Date().toISOString();
+            await this.refreshCachedStatus();
+            return this.withUsage(result);
         } finally {
-            this.setSyncing(false);
+            this.endOp();
         }
     }
 
@@ -148,7 +294,7 @@ export class GitHubSyncService {
     private async fullPull(): Promise<PullResult> {
         // 1. Download meta.json
         const metaResult = await this.api.fetchJsonFile<MetaFile>('meta.json');
-        const meta = metaResult?.content as MetaFile | null;
+        const meta = (metaResult?.content as MetaFile | null) ?? null;
 
         // 2. Determine which collections exist. Data may live only in
         // changelog entries (nothing has been compacted yet), so the changelog
@@ -160,12 +306,25 @@ export class GitHubSyncService {
             ? Object.keys(meta.collections)
             : await this.guessCollectionNames();
 
+        // Changelogs are downloaded once and reused: a repo whose data only
+        // exists in changelogs must not fetch the same file twice.
+        const changelogs: ChangelogFile[] = [];
+        const downloadChangelogs = async (): Promise<ChangelogFile[]> => {
+            if (changelogs.length === 0 && changelogFiles.length > 0) {
+                for (const filename of changelogFiles) {
+                    const result = await this.api.fetchJsonFile<ChangelogFile>(
+                        `changelog/${filename}`,
+                    );
+                    if (result) changelogs.push(result.content as ChangelogFile);
+                }
+            }
+            return changelogs;
+        };
+
         if (collectionNames.length === 0 && changelogFiles.length > 0) {
             const seen = new Set<string>();
-            for (const filename of changelogFiles) {
-                const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
-                const changelog = result?.content as ChangelogFile | undefined;
-                for (const change of changelog?.changes ?? []) {
+            for (const changelog of await downloadChangelogs()) {
+                for (const change of changelog.changes ?? []) {
                     if (change.collection) seen.add(change.collection);
                 }
             }
@@ -173,7 +332,11 @@ export class GitHubSyncService {
         }
 
         if (collectionNames.length === 0 && changelogFiles.length === 0) {
-            // Empty repo — nothing to pull
+            // Empty repo — nothing to pull. Still install a cursor when the
+            // branch has commits, so the next pull is incremental instead of
+            // repeating these directory listings forever.
+            await this.tryInstallCursor();
+            await this.refreshCachedStatus();
             return { type: 'none' };
         }
 
@@ -197,33 +360,24 @@ export class GitHubSyncService {
         await this.runMigrations(meta, collections);
 
         // 5. Apply changelog entries that are newer than the collection files
-        const changelogs: ChangelogFile[] = [];
-        for (const filename of changelogFiles) {
-            const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
-            if (result) {
-                changelogs.push(result.content as ChangelogFile);
-            }
-        }
+        const pendingChangelogs = await downloadChangelogs();
 
         // 6. Merge into local database
+        let documentsMerged = 0;
         for (const [name, collectionFile] of Object.entries(collections)) {
-            await this.mergeCollectionFileToLocal(name, collectionFile);
+            documentsMerged += await this.mergeCollectionFileToLocal(name, collectionFile);
         }
 
         // Apply changelogs on top
-        for (const changelog of changelogs) {
-            await this.applyChangelogToLocal(changelog);
+        let changelogOps = 0;
+        for (const changelog of pendingChangelogs) {
+            changelogOps += await this.applyChangelogToLocal(changelog);
         }
 
         // 7. Update sync cursor
-        const headSha = await this.api.getLatestCommitSha();
-        await this.localDb.setSyncCursor({
-            sha: headSha,
-            timestamp: new Date().toISOString(),
-        });
+        await this.installCursor(await this.resolveHeadSha());
 
-        this.emitStatus();
-        return { type: 'full', collections, meta };
+        return { type: 'full', collections, meta, documentsMerged, changelogOps };
     }
 
     /**
@@ -234,12 +388,26 @@ export class GitHubSyncService {
         const comparison = await this.api.compareCommits(cursor.sha);
 
         if (comparison.status === 'identical') {
+            // Nothing changed remotely — keep the cursor timestamp fresh.
+            await this.installCursor(comparison.headSha || cursor.sha);
             return { type: 'none' };
+        }
+
+        if (comparison.status === 'diverged' || comparison.status === 'behind') {
+            // The cursor is no longer an ancestor of the branch head (force-push,
+            // history rewrite, rollback). Applying "no changed files" here would
+            // silently skip remote data, so re-read everything instead.
+            console.warn(
+                `[GitterSync] Cursor ${cursor.sha.slice(0, 7)} is ${comparison.status} from the branch head — falling back to a full pull`,
+            );
+            await this.localDb.clearSyncCursor();
+            this.cachedCursor = null;
+            return this.fullPull();
         }
 
         // 1.5. Fetch meta.json for migration check
         const metaResult = await this.api.fetchJsonFile<MetaFile>('meta.json');
-        const meta = metaResult?.content as MetaFile | null;
+        const meta = (metaResult?.content as MetaFile | null) ?? null;
 
         // 2. Download only changed files
         const changedCollections: Record<string, CollectionFile> = {};
@@ -269,23 +437,26 @@ export class GitHubSyncService {
         await this.runMigrations(meta, changedCollections);
 
         // 3. Merge into local database
+        let documentsMerged = 0;
         for (const [name, collectionFile] of Object.entries(changedCollections)) {
-            await this.mergeCollectionFileToLocal(name, collectionFile);
+            documentsMerged += await this.mergeCollectionFileToLocal(name, collectionFile);
         }
 
+        let changelogOps = 0;
         for (const changelog of changelogs) {
-            await this.applyChangelogToLocal(changelog);
+            changelogOps += await this.applyChangelogToLocal(changelog);
         }
 
-        // 4. Update sync cursor
-        const headSha = await this.api.getLatestCommitSha();
-        await this.localDb.setSyncCursor({
-            sha: headSha,
-            timestamp: new Date().toISOString(),
-        });
+        // 4. Update sync cursor — the compare response already knows the head
+        await this.installCursor(await this.resolveHeadSha(comparison.headSha));
 
-        this.emitStatus();
-        return { type: 'incremental', collections: changedCollections, changelogs };
+        return {
+            type: 'incremental',
+            collections: changedCollections,
+            changelogs,
+            documentsMerged,
+            changelogOps,
+        };
     }
 
     /**
@@ -341,19 +512,33 @@ export class GitHubSyncService {
     /**
      * Push local changelog entries to GitHub.
      *
-     * Batches all pending entries into a single changelog file,
-     * then checks if compaction is needed.
+     * Batches every pending entry into a single changelog file (1–2 REST calls),
+     * drains the local queue, then runs compaction when the remote changelog
+     * directory reached `compactionThreshold`.
+     *
+     * @returns How many entries were pushed and what it cost
      */
-    async push(): Promise<void> {
+    async push(): Promise<PushResult> {
         this.ensureInitialized();
-        this.setSyncing(true);
+        return this.withLock(() => this.pushInternal());
+    }
+
+    private async pushInternal(): Promise<PushResult> {
+        this.beginOp();
+        this.resetApiUsage();
 
         try {
             // 1. Get pending changelog entries
             const entries = await this.localDb.getPendingChangelogEntries();
 
             if (entries.length === 0) {
-                return; // Nothing to push
+                return {
+                    pushed: 0,
+                    changelogPath: null,
+                    compacted: false,
+                    apiCalls: 0,
+                    rawReads: 0,
+                };
             }
 
             // 2. Build the changelog file
@@ -367,6 +552,7 @@ export class GitHubSyncService {
 
             // 3. Push to GitHub
             const fileName = `changelog/${timestamp.replace(/[:.]/g, '-')}_${deviceId}.json`;
+            const cursorBefore = await this.localDb.getSyncCursor();
             await this.api.createOrUpdateFileWithRetry(
                 fileName,
                 JSON.stringify(changelogFile, null, 2),
@@ -377,22 +563,30 @@ export class GitHubSyncService {
             const localIds = entries.filter((e) => e.localId !== undefined).map((e) => e.localId!);
             await this.localDb.clearChangelogEntries(localIds);
 
-            // 5. Update sync cursor
-            const headSha = await this.api.getLatestCommitSha();
-            await this.localDb.setSyncCursor({
-                sha: headSha,
-                timestamp: new Date().toISOString(),
-            });
+            // 5. Advance the sync cursor using the commit we just created —
+            //    no extra listCommits request, and only when it is safe.
+            await this.advanceCursorAfterWrite(cursorBefore);
 
             // 6. Check if compaction is needed
+            let compacted = false;
             const changelogFiles = await this.api.listDirectory('changelog');
             if (changelogFiles.length >= this.config.compactionThreshold) {
-                await this.compact();
+                await this.compactInternal();
+                compacted = true;
             }
 
-            this.emitStatus();
+            this.lastSyncAt = new Date().toISOString();
+            await this.refreshCachedStatus();
+
+            return {
+                pushed: entries.length,
+                changelogPath: fileName,
+                compacted,
+                apiCalls: this.usage().apiCalls,
+                rawReads: this.usage().rawReads,
+            };
         } finally {
-            this.setSyncing(false);
+            this.endOp();
         }
     }
 
@@ -400,24 +594,46 @@ export class GitHubSyncService {
 
     /**
      * Perform a full sync: pull remote changes, then push local changes.
+     *
+     * A GitHub 409 (another device committed first) retries the whole cycle up
+     * to `maxRetries` times — the retry loop is bounded, so a permanently
+     * conflicting repository surfaces an error instead of spinning forever.
+     *
+     * @returns What was pulled plus how many local changelog entries were
+     * pushed (`type: 'none'` and `pushed: 0` when the sync was skipped because
+     * another operation is already running)
      */
-    async sync(): Promise<PullResult> {
-        if (this.isSyncing) {
+    async sync(): Promise<SyncResult> {
+        this.ensureInitialized();
+
+        if (this.isSyncingFlag || this.claimedOps > 0) {
             console.warn('[GitterSync] Sync skipped — already in progress');
-            return { type: 'none' };
+            return { type: 'none', pushed: 0 };
         }
 
+        this.claimedOps += 1;
         try {
-            const pullResult = await this.pull();
-            await this.push();
-            return pullResult;
-        } catch (error) {
-            if (error instanceof ConflictError) {
-                // Retry the entire sync
-                console.warn(`[GitterSync] Conflict during sync, retrying...`);
-                return this.sync();
-            }
-            throw error;
+            return await this.withLock(async () => {
+                let attempt = 0;
+                for (;;) {
+                    try {
+                        const pullResult = await this.pullInternal();
+                        const pushResult = await this.pushInternal();
+                        return { ...pullResult, pushed: pushResult.pushed };
+                    } catch (error) {
+                        if (error instanceof ConflictError && attempt < this.config.maxRetries) {
+                            attempt += 1;
+                            console.warn(
+                                `[GitterSync] Conflict during sync, retrying (${attempt}/${this.config.maxRetries})...`,
+                            );
+                            continue;
+                        }
+                        throw error;
+                    }
+                }
+            });
+        } finally {
+            this.claimedOps -= 1;
         }
     }
 
@@ -426,97 +642,134 @@ export class GitHubSyncService {
     /**
      * Compact changelog entries into collection files.
      *
-     * This reads all changelog entries from GitHub, applies them to the
-     * corresponding collection files, and deletes the applied entries.
+     * Reads every remote changelog, applies the entries to the matching
+     * collection file, purges soft-deletes older than `deleteRetentionMs`, then
+     * removes the applied changelog files and refreshes `meta.json`.
+     *
+     * Collection files are read with `{ forceApi: true }`: a compaction
+     * rewrites the whole file, so a CDN-cached copy could resurrect data that
+     * another device just compacted.
+     *
+     * @returns What was compacted and what it cost
      */
-    async compact(): Promise<void> {
+    async compact(): Promise<CompactionResult> {
         this.ensureInitialized();
+        return this.withLock(() => this.compactInternal());
+    }
 
-        // 1. Get all changelog files
-        const changelogFiles = await this.api.listDirectory('changelog');
-        if (changelogFiles.length === 0) return;
+    private async compactInternal(): Promise<CompactionResult> {
+        this.beginOp();
+        this.resetApiUsage();
 
-        // 2. Download all changelog entries
-        const changelogs: ChangelogFile[] = [];
-        for (const filename of changelogFiles) {
-            const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
-            if (result) {
-                changelogs.push(result.content as ChangelogFile);
-            }
-        }
+        const emptyResult: CompactionResult = {
+            changelogsCompacted: 0,
+            collectionsWritten: [],
+            purgedDeletes: 0,
+            apiCalls: 0,
+        };
 
-        // 3. Group changes by collection
-        const changesByCollection: Record<string, ChangelogEntry[]> = {};
-        for (const cl of changelogs) {
-            for (const change of cl.changes) {
-                if (!changesByCollection[change.collection]) {
-                    changesByCollection[change.collection] = [];
+        try {
+            // 1. Get all changelog files
+            const changelogFiles = await this.api.listDirectory('changelog');
+            if (changelogFiles.length === 0) return emptyResult;
+
+            // 2. Download all changelog entries
+            const changelogs: ChangelogFile[] = [];
+            for (const filename of changelogFiles) {
+                const result = await this.api.fetchJsonFile<ChangelogFile>(`changelog/${filename}`);
+                if (result) {
+                    changelogs.push(result.content as ChangelogFile);
                 }
-                changesByCollection[change.collection].push(change);
-            }
-        }
-
-        // 4. For each affected collection, pull, apply changelogs, push
-        for (const [collectionName, changes] of Object.entries(changesByCollection)) {
-            const result = await this.api.fetchJsonFile<CollectionFile>(
-                `collections/${collectionName}.json`,
-            );
-
-            let collectionData: CollectionFile;
-            if (result) {
-                collectionData = result.content as CollectionFile;
-            } else {
-                // Collection file doesn't exist yet — create empty
-                collectionData = {
-                    collection: collectionName,
-                    version: 0,
-                    updatedAt: new Date().toISOString(),
-                    documents: {},
-                };
             }
 
-            // Apply changelogs
-            const deviceId = this.localDb.getDeviceId();
-            const merged = applyChangelogToCollection(collectionData, changes, deviceId);
-
-            // Purge expired soft-deletes
-            const expiredIds = getExpiredDeletes(merged.documents, PURGE_AGE_MS);
-            for (const id of expiredIds) {
-                delete merged.documents[id];
+            // 3. Group changes by collection
+            const changesByCollection: Record<string, ChangelogEntry[]> = {};
+            for (const cl of changelogs) {
+                for (const change of cl.changes) {
+                    if (!changesByCollection[change.collection]) {
+                        changesByCollection[change.collection] = [];
+                    }
+                    changesByCollection[change.collection].push(change);
+                }
             }
 
-            // Push updated collection file
-            await this.api.createOrUpdateFileWithRetry(
-                `collections/${collectionName}.json`,
-                JSON.stringify(merged, null, 2),
-                `Compact: merge ${changes.length} changes into ${collectionName}`,
-            );
-        }
+            // 4. For each affected collection, pull, apply changelogs, push
+            const collectionsWritten: string[] = [];
+            let purgedDeletes = 0;
 
-        // 5. Delete applied changelog files
-        for (const filename of changelogFiles) {
-            try {
-                await this.api.deleteFile(
-                    `changelog/${filename}`,
-                    `Compact: remove applied changelog ${filename}`,
+            for (const [collectionName, changes] of Object.entries(changesByCollection)) {
+                const result = await this.api.fetchJsonFile<CollectionFile>(
+                    `collections/${collectionName}.json`,
+                    { forceApi: true },
                 );
-            } catch (error) {
-                // Non-fatal — changelog may have already been deleted by another device
-                console.warn(`[GitterSync] Failed to delete changelog ${filename}:`, error);
+
+                let collectionData: CollectionFile;
+                if (result) {
+                    collectionData = result.content as CollectionFile;
+                } else {
+                    // Collection file doesn't exist yet — create empty
+                    collectionData = {
+                        collection: collectionName,
+                        version: 0,
+                        updatedAt: new Date().toISOString(),
+                        documents: {},
+                    };
+                }
+
+                // Apply changelogs
+                const deviceId = this.localDb.getDeviceId();
+                const merged = applyChangelogToCollection(collectionData, changes, deviceId);
+
+                // Purge expired soft-deletes
+                const expiredIds = getExpiredDeletes(
+                    merged.documents,
+                    this.config.deleteRetentionMs,
+                );
+                for (const id of expiredIds) {
+                    delete merged.documents[id];
+                }
+                purgedDeletes += expiredIds.length;
+
+                // Push updated collection file
+                await this.api.createOrUpdateFileWithRetry(
+                    `collections/${collectionName}.json`,
+                    JSON.stringify(merged, null, 2),
+                    `Compact: merge ${changes.length} changes into ${collectionName}`,
+                );
+                collectionsWritten.push(collectionName);
             }
+
+            // 5. Delete applied changelog files
+            for (const filename of changelogFiles) {
+                try {
+                    await this.api.deleteFile(
+                        `changelog/${filename}`,
+                        `Compact: remove applied changelog ${filename}`,
+                    );
+                } catch (error) {
+                    // Non-fatal — changelog may have already been deleted by another device
+                    console.warn(`[GitterSync] Failed to delete changelog ${filename}:`, error);
+                }
+            }
+
+            // 6. Update meta.json
+            await this.pushMetaUpdate();
+
+            // 7. Update sync cursor
+            await this.advanceCursorAfterWrite(await this.localDb.getSyncCursor());
+
+            this.lastSyncAt = new Date().toISOString();
+            await this.refreshCachedStatus();
+
+            return {
+                changelogsCompacted: changelogFiles.length,
+                collectionsWritten,
+                purgedDeletes,
+                apiCalls: this.usage().apiCalls,
+            };
+        } finally {
+            this.endOp();
         }
-
-        // 6. Update meta.json
-        await this.pushMetaUpdate();
-
-        // 7. Update sync cursor
-        const headSha = await this.api.getLatestCommitSha();
-        await this.localDb.setSyncCursor({
-            sha: headSha,
-            timestamp: new Date().toISOString(),
-        });
-
-        this.emitStatus();
     }
 
     // ─── File Storage ──────────────────────────────────────────────────
@@ -524,59 +777,83 @@ export class GitHubSyncService {
     /**
      * Upload a binary file to GitHub.
      *
-     * Uses files-first ordering: the file is uploaded BEFORE any
-     * metadata references are created. If the metadata update fails,
-     * the orphaned file is harmless.
+     * Uses files-first ordering: the file is uploaded BEFORE any metadata
+     * reference is created, so a failed metadata write can only leave a harmless
+     * orphan instead of a dangling pointer.
      *
-     * @param filePath - Path within the repo — e.g., 'files/doc_abc123.pdf'
-     * @param base64Content - Base64-encoded file content
-     * @param message - Commit message
-     * @returns File reference metadata
+     * @param filePath - Path within the repo, e.g. `files/task-1/photo.png`
+     * @param content - Base64 string, `Blob`/`File`, `ArrayBuffer` or `Uint8Array`
+     * @param message - Commit message (defaults to `Upload <filename>`)
+     * @param mimeType - MIME type override; inferred from the extension otherwise
+     * @returns File reference metadata for storing inside a document
+     * @throws {ValidationError} When the path is unsafe or the file exceeds
+     * GitHub's 1 MiB Contents API limit
+     *
+     * @example
+     * ```typescript
+     * // Browser: pass the File directly
+     * const ref = await sync.uploadFile(`files/${taskId}/${file.name}`, file)
+     * ```
      */
-    async uploadFile(filePath: string, base64Content: string, message: string): Promise<FileRef> {
+    async uploadFile(
+        filePath: string,
+        content: UploadableContent,
+        message?: string,
+        mimeType?: string,
+    ): Promise<FileRef> {
         this.ensureInitialized();
+        assertValidRepoPath(filePath);
 
-        const sha = await this.api.uploadBinaryFile(filePath, base64Content, message);
+        const { base64, size } = await toBase64Payload(content);
+        const commitMessage = message ?? `Upload ${filePath.split('/').pop()}`;
 
-        // Estimate size from base64 content
-        const size = Math.ceil(base64Content.length * 0.75);
-
-        // Extract MIME type from file extension
-        const extension = filePath.split('.').pop()?.toLowerCase() || '';
-        const mimeTypeMap: Record<string, string> = {
-            pdf: 'application/pdf',
-            jpg: 'image/jpeg',
-            jpeg: 'image/jpeg',
-            png: 'image/png',
-            gif: 'image/gif',
-            webp: 'image/webp',
-            svg: 'image/svg+xml',
-            doc: 'application/msword',
-            docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            xls: 'application/vnd.ms-excel',
-            xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        };
-        const mimeType = mimeTypeMap[extension] || 'application/octet-stream';
+        const sha = await this.api.uploadBinaryFile(filePath, base64, commitMessage);
 
         return {
             path: filePath,
             sha,
             size,
-            mimeType,
+            mimeType: mimeType ?? guessMimeType(filePath),
         };
     }
 
     /**
      * Download a binary file from GitHub.
+     *
+     * Served by `raw.githubusercontent.com` when possible, which keeps
+     * attachment-heavy apps well inside the hourly rate limit.
+     *
+     * @param filePath - Path within the repo
+     * @param options - `{ forceApi: true }` bypasses the raw channel
      */
-    async downloadFile(filePath: string): Promise<Blob> {
+    async downloadFile(filePath: string, options: FetchFileOptions = {}): Promise<Blob> {
         this.ensureInitialized();
+        assertValidRepoPath(filePath);
+        return this.api.downloadBinaryFile(filePath, options);
+    }
 
-        if (!this.token) {
-            throw new Error('Not authenticated');
-        }
+    /**
+     * Delete a file from the repository (e.g. an attachment whose document was
+     * removed). Missing files are not an error.
+     *
+     * @param filePath - Path within the repo
+     * @param message - Commit message
+     */
+    async deleteFile(filePath: string, message?: string): Promise<void> {
+        this.ensureInitialized();
+        assertValidRepoPath(filePath);
+        await this.api.deleteFile(filePath, message ?? `Delete ${filePath}`);
+    }
 
-        return this.api.downloadBinaryFile(filePath);
+    /**
+     * List files stored under a directory, recursively.
+     *
+     * @param dir - Directory inside the repo, e.g. `files`
+     * @returns Paths relative to `dir`
+     */
+    async listFiles(dir = 'files'): Promise<string[]> {
+        this.ensureInitialized();
+        return this.api.listDirectoryRecursive(dir);
     }
 
     // ─── Data Export/Import ────────────────────────────────────────────
@@ -584,8 +861,10 @@ export class GitHubSyncService {
     /**
      * Export all data from GitHub as a ZIP file.
      *
-     * Fetches meta.json, all collection files, changelogs, and binary files
-     * from the remote repository and packages them into a downloadable ZIP.
+     * Fetches meta.json, all collection files, changelogs and binary files and
+     * packages them into a downloadable archive. Bulk reads go through the raw
+     * channel by default, so exporting a large repository is cheap in rate-limit
+     * terms.
      *
      * @returns A Blob containing the ZIP archive
      */
@@ -661,11 +940,15 @@ export class GitHubSyncService {
      * Import data from a ZIP file, replacing local data.
      *
      * Parses the ZIP, validates its structure, replaces local collection data,
-     * clears the sync cursor (to force a full re-sync on next pull), and updates
-     * the local schema version if meta.json contains one.
+     * clears the sync cursor (forcing a full re-sync on the next pull) and adopts
+     * the schema version recorded in `meta.json`.
+     *
+     * The local changelog queue is preserved, so changes made on this device
+     * that have not been pushed yet survive the import.
      *
      * @param file - The ZIP file to import (as File or Blob)
-     * @throws {ValidationError} If the file is not a valid ZIP or has invalid structure
+     * @throws {ValidationError} If the file is not a valid ZIP, has no
+     * `manifest.json`, or contains no collection files
      */
     async importData(file: File | Blob): Promise<void> {
         this.ensureInitialized();
@@ -743,26 +1026,53 @@ export class GitHubSyncService {
         await this.localDb.clearSyncCursor();
 
         // 7. Emit status change
+        this.cachedCursor = null;
+        await this.refreshCachedStatus();
         this.emitStatus();
+
+        if (manifest?.sourceVersion && manifest.sourceVersion !== LIBRARY_VERSION) {
+            console.info(
+                `[GitterSync] Imported an export created by gittersync ${manifest.sourceVersion} (running ${LIBRARY_VERSION})`,
+            );
+        }
     }
 
     // ─── Auto Sync ─────────────────────────────────────────────────────
 
     /**
-     * Start automatic sync with a given interval.
+     * Start automatic sync on an interval.
+     *
+     * Behaviour:
+     * - Cycles are skipped while the browser reports being offline.
+     * - An `online` event triggers an immediate sync.
+     * - A rate-limit error pauses cycles until GitHub's reset time instead of
+     *   hammering an exhausted budget.
+     * - Errors are logged, never thrown into the timer.
      *
      * @param intervalMs - Sync interval in milliseconds (default: 5 minutes)
      */
-    startAutoSync(intervalMs = 5 * 60 * 1000): void {
+    startAutoSync(intervalMs = DEFAULT_AUTO_SYNC_INTERVAL_MS): void {
         this.stopAutoSync();
+        this.autoSyncIntervalMs = Math.max(1000, Math.floor(intervalMs));
 
-        const doSync = async () => {
+        const doSync = async (): Promise<void> => {
             if (!this.online) {
                 return; // Skip sync cycle when offline
+            }
+            if (Date.now() < this.rateLimitedUntil) {
+                return; // Rate limited — wait for the window to reset
             }
             try {
                 await this.sync();
             } catch (error) {
+                if (error instanceof RateLimitError) {
+                    this.rateLimitedUntil = error.resetAt.getTime();
+                    console.warn(
+                        `[GitterSync] Auto-sync paused until ${error.resetAt.toISOString()} (rate limit)`,
+                    );
+                    this.emitStatus();
+                    return;
+                }
                 console.error('[GitterSync] Auto-sync failed:', error);
             }
         };
@@ -771,9 +1081,10 @@ export class GitHubSyncService {
         if (typeof window !== 'undefined') {
             this.boundOnlineHandler = () => {
                 this.online = true;
+                this.rateLimitedUntil = 0;
                 this.emitStatus();
                 // Trigger an immediate sync when connectivity returns
-                doSync();
+                void doSync();
             };
             this.boundOfflineHandler = () => {
                 this.online = false;
@@ -784,14 +1095,14 @@ export class GitHubSyncService {
         }
 
         // Initial sync (if online)
-        doSync();
+        void doSync();
 
         // Set up interval
-        this.syncTimer = setInterval(doSync, intervalMs);
+        this.syncTimer = setInterval(() => void doSync(), this.autoSyncIntervalMs);
     }
 
     /**
-     * Stop automatic sync.
+     * Stop automatic sync and remove the online/offline listeners.
      */
     stopAutoSync(): void {
         if (this.syncTimer) {
@@ -812,6 +1123,16 @@ export class GitHubSyncService {
         }
     }
 
+    /** Whether auto-sync is currently running. */
+    get autoSyncRunning(): boolean {
+        return this.syncTimer !== null;
+    }
+
+    /** The configured auto-sync interval in ms. */
+    get autoSyncInterval(): number {
+        return this.autoSyncIntervalMs;
+    }
+
     /**
      * Whether the browser reports an active network connection.
      * Defaults to `true` in non-browser environments.
@@ -820,58 +1141,272 @@ export class GitHubSyncService {
         return this.online;
     }
 
+    // ─── Teardown ──────────────────────────────────────────────────────
+
+    /**
+     * Stop auto-sync, drop the token and close the local databases.
+     *
+     * Local data is kept — use {@link reset} to wipe it as well.
+     */
+    async destroy(): Promise<void> {
+        this.stopAutoSync();
+        this.token = null;
+        this.initialized = false;
+        await this.localDb.close();
+        this.emitStatus();
+    }
+
+    /**
+     * Erase every local trace of this repository: documents, changelog queue,
+     * sync cursor and schema version. The next `pull()` is a full pull.
+     *
+     * Remote data is untouched.
+     */
+    async reset(): Promise<void> {
+        await this.localDb.clearAll();
+        this.cachedCursor = null;
+        this.cachedPendingChanges = 0;
+        this.lastSyncAt = null;
+        this.emitStatus();
+    }
+
     // ─── Status ─────────────────────────────────────────────────────────
 
     /**
      * Get the current sync status.
+     *
+     * Synchronous and free: values are cached by the running operations, so this
+     * is safe to call from a render loop or the `onSyncStatusChange` callback.
+     * Use {@link getFullStatus} to refresh repo size from GitHub.
      */
     getStatus(): SyncStatus {
         return {
-            isSyncing: this.isSyncing,
+            isSyncing: this.isSyncingFlag,
             isOnline: this.online,
-            cursor: null, // Will be populated async
-            deviceId: this.localDb.getDeviceId(),
-            pendingChanges: 0, // Will be populated async
-            repoSizeKb: this.api.rateLimitRemaining !== null ? null : null,
-            rateLimitRemaining: this.api.rateLimitRemaining,
+            isInitialized: this.initialized,
+            lastSyncAt: this.lastSyncAt,
+            cursor: this.cachedCursor,
+            deviceId: this.cachedDeviceId,
+            pendingChanges: this.cachedPendingChanges,
+            repoSizeKb: this.cachedRepoSizeKb,
+            rateLimitRemaining: this.api.rateLimitRemaining ?? null,
+            rateLimitResetAt: this.api.rateLimitResetAt?.toISOString() ?? null,
+            rawContentActive: this.api.rawContentActive ?? false,
         };
     }
 
     /**
-     * Get the full sync status (async — includes data from the database).
+     * Get the full sync status, refreshing values that need I/O.
+     *
+     * Reads the cursor and pending-change count from IndexedDB and the repository
+     * size from GitHub (1 REST call). Results are cached so the next
+     * {@link getStatus} reports them too.
      */
     async getFullStatus(): Promise<SyncStatus> {
-        const cursor = await this.localDb.getSyncCursor();
-        const pendingChanges = await this.localDb.getPendingChangelogCount();
+        await this.refreshCachedStatus();
 
-        let repoSizeKb: number | null = null;
         try {
-            repoSizeKb = await this.api.getRepoSize();
+            this.cachedRepoSizeKb = await this.api.getRepoSize();
         } catch {
-            // Non-critical
+            // Non-critical — keep the last known value
+            this.cachedRepoSizeKb = this.api.getCachedRepoSize?.() ?? this.cachedRepoSizeKb;
         }
 
+        return this.getStatus();
+    }
+
+    /**
+     * Rate limit and transport counters — how much of the hourly budget this
+     * service instance has spent, and how many reads the raw channel absorbed.
+     */
+    getRateLimitInfo(): RateLimitInfo {
+        const usage = this.usage();
         return {
-            isSyncing: this.isSyncing,
-            isOnline: this.online,
-            cursor,
-            deviceId: this.localDb.getDeviceId(),
-            pendingChanges,
-            repoSizeKb,
-            rateLimitRemaining: this.api.rateLimitRemaining,
+            remaining: this.api.rateLimitRemaining ?? null,
+            resetAt: this.api.rateLimitResetAt?.toISOString() ?? null,
+            apiCalls: usage.apiCalls,
+            rawReads: usage.rawReads,
+            rawMisses: usage.rawMisses,
+            rawFallbacks: usage.rawFallbacks,
+            rawContentActive: this.api.rawContentActive ?? false,
         };
+    }
+
+    /** Number of local changes waiting to be pushed (reads IndexedDB). */
+    async getPendingChanges(): Promise<number> {
+        const count = await this.localDb.getPendingChangelogCount();
+        this.cachedPendingChanges = count;
+        return count;
+    }
+
+    /** The resolved configuration this service is running with. */
+    getConfig(): Readonly<ResolvedGitHubSyncConfig> {
+        return this.config;
     }
 
     // ─── Local Database Access ──────────────────────────────────────────
 
     /**
      * Get the local database instance for direct document access.
+     *
+     * This is the offline-first API your UI reads and writes against; changes
+     * are queued locally and reach GitHub on the next `push()`/`sync()`.
+     *
+     * @example
+     * ```typescript
+     * const db = sync.getLocalDb()
+     * const users = await db.getAllDocuments<{ name: string }>('users')
+     * await db.deleteDocument('users', users[0].id)
+     * ```
      */
     getLocalDb(): LocalDB {
         return this.localDb;
     }
 
+    /** The underlying GitHub API adapter — for advanced usage and diagnostics. */
+    getApi(): GitHubApiAdapter {
+        return this.api;
+    }
+
     // ─── Private Helpers ────────────────────────────────────────────────
+
+    /** Run an operation under the serialisation lock. */
+    private withLock<T>(fn: () => Promise<T>): Promise<T> {
+        const run = this.lock.then(fn, fn);
+        // Keep the chain alive even when an operation rejects.
+        this.lock = run.then(
+            () => undefined,
+            () => undefined,
+        );
+        return run;
+    }
+
+    private beginOp(): void {
+        this.syncingDepth += 1;
+        if (!this.isSyncingFlag) {
+            this.isSyncingFlag = true;
+            this.emitStatus();
+        }
+    }
+
+    private endOp(): void {
+        this.syncingDepth = Math.max(0, this.syncingDepth - 1);
+        if (this.syncingDepth === 0 && this.isSyncingFlag) {
+            this.isSyncingFlag = false;
+            this.emitStatus();
+        }
+    }
+
+    /** Refresh the cached status fields that require IndexedDB reads. */
+    private async refreshCachedStatus(): Promise<void> {
+        try {
+            this.cachedCursor = await this.localDb.getSyncCursor();
+            this.cachedPendingChanges = await this.localDb.getPendingChangelogCount();
+            this.cachedDeviceId = this.safeDeviceId() || this.cachedDeviceId;
+            this.cachedRepoSizeKb = this.api.getCachedRepoSize?.() ?? this.cachedRepoSizeKb;
+        } catch {
+            // Status is best-effort — never fail an operation because of it
+        }
+    }
+
+    private safeDeviceId(): string {
+        try {
+            return this.localDb.getDeviceId();
+        } catch {
+            return this.cachedDeviceId;
+        }
+    }
+
+    /** Attach transport counters to a pull result. */
+    private withUsage(result: PullResult): PullResult {
+        if (result.type === 'none') return result;
+        const usage = this.usage();
+        return { ...result, apiCalls: usage.apiCalls, rawReads: usage.rawReads };
+    }
+
+    /**
+     * Transport counters from the adapter.
+     *
+     * Optional-chained because applications may inject a custom or stubbed
+     * adapter that predates the telemetry methods.
+     */
+    private usage(): ApiUsageSnapshot {
+        return this.api.getUsage?.() ?? { apiCalls: 0, rawReads: 0, rawMisses: 0, rawFallbacks: 0 };
+    }
+
+    private resetApiUsage(): void {
+        this.api.resetUsage?.();
+    }
+
+    /** Persist a new sync cursor (and the cached copy). */
+    private async installCursor(sha: string): Promise<void> {
+        if (!sha) return;
+        const cursor: SyncCursor = { sha, timestamp: new Date().toISOString() };
+        await this.localDb.setSyncCursor(cursor);
+        this.cachedCursor = cursor;
+    }
+
+    /**
+     * Install a cursor after a full pull of an *empty* repository, so repeated
+     * pulls stop re-listing directories. A branch with no commits yet simply
+     * keeps no cursor.
+     */
+    private async tryInstallCursor(): Promise<void> {
+        try {
+            await this.installCursor(await this.api.getLatestCommitSha());
+        } catch {
+            // Empty branch (no commits) — nothing to point a cursor at
+        }
+    }
+
+    /**
+     * Resolve the branch head, preferring a SHA we already paid for.
+     *
+     * @param knownHead - Head SHA from a compare response or a write
+     */
+    private async resolveHeadSha(knownHead?: string | null): Promise<string> {
+        if (knownHead) return knownHead;
+        return this.api.getLatestCommitSha();
+    }
+
+    /**
+     * Advance the sync cursor after a write, without spending a request on
+     * `listCommits` — and only when doing so cannot skip another device's work.
+     *
+     * - No cursor yet → install none. A device that has never pulled must keep
+     *   doing full pulls, or it would silently skip the repository's history.
+     * - Our commit's parent is the current cursor → nobody else committed in
+     *   between, so the cursor moves to our commit for free.
+     * - Otherwise → leave the cursor alone. The next pull re-reads the commits we
+     *   skipped (including our own changelog, which merges idempotently).
+     */
+    private async advanceCursorAfterWrite(previous: SyncCursor | null): Promise<void> {
+        if (!previous) return;
+
+        const commit = this.api.getLastCommit?.() ?? null;
+
+        if (commit?.sha && commit.parentShas.length > 0) {
+            if (commit.parentShas.includes(previous.sha)) {
+                await this.installCursor(commit.sha);
+            }
+            return;
+        }
+
+        if (commit?.sha) {
+            // Parents were not reported — still safe, because a commit created by
+            // this write is the branch head unless someone else raced us, and a
+            // subsequent pull would detect that.
+            await this.installCursor(commit.sha);
+            return;
+        }
+
+        // Adapter reported nothing (e.g. a test double) — fall back to a lookup.
+        try {
+            await this.installCursor(await this.api.getLatestCommitSha());
+        } catch {
+            // Keep the previous cursor rather than losing it
+        }
+    }
 
     /**
      * Merge a remote collection file into the local database.
@@ -880,18 +1415,19 @@ export class GitHubSyncService {
     private async mergeCollectionFileToLocal(
         collectionName: string,
         collectionFile: CollectionFile,
-    ): Promise<void> {
+    ): Promise<number> {
         const remoteDocs = collectionFile.documents as Record<string, SyncedDocument>;
 
         await this.localDb.mergeDocuments(collectionName, remoteDocs, (localDoc, remoteDoc) =>
             mergeDocument(localDoc, remoteDoc),
         );
+        return Object.keys(remoteDocs).length;
     }
 
     /**
      * Apply a remote changelog file to the local database.
      */
-    private async applyChangelogToLocal(changelog: ChangelogFile): Promise<void> {
+    private async applyChangelogToLocal(changelog: ChangelogFile): Promise<number> {
         // Group changes by collection
         const changesByCollection: Record<string, ChangelogEntry[]> = {};
         for (const change of changelog.changes) {
@@ -912,26 +1448,7 @@ export class GitHubSyncService {
 
             for (const change of changes) {
                 if (change.op === 'create') {
-                    const newData: Record<string, unknown> = {};
-                    const newFields: Record<string, { updatedAt: string; device: string }> = {};
-
-                    for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
-                        newData[fieldName] = fieldData.value;
-                        newFields[fieldName] = { updatedAt: fieldData.updatedAt, device: deviceId };
-                    }
-
-                    const firstFieldTime =
-                        Object.values(newFields)[0]?.updatedAt || new Date().toISOString();
-
-                    const doc: SyncedDocument = {
-                        id: change.docId,
-                        data: newData,
-                        _fields: newFields,
-                        updated_at: firstFieldTime,
-                        created_at: firstFieldTime,
-                        deleted_at: null,
-                        deleted_by: null,
-                    };
+                    const doc = documentFromChange(change, deviceId);
 
                     // Check if document already exists locally
                     const existing = await this.localDb.getDocument(collectionName, change.docId);
@@ -951,31 +1468,9 @@ export class GitHubSyncService {
                     if (!existing) {
                         // Upsert: an update for an unknown document still carries
                         // data (the create may not have reached this device yet).
-                        const newData: Record<string, unknown> = {};
-                        const newFields: Record<string, { updatedAt: string; device: string }> = {};
-
-                        for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
-                            newData[fieldName] = fieldData.value;
-                            newFields[fieldName] = {
-                                updatedAt: fieldData.updatedAt,
-                                device: deviceId,
-                            };
-                        }
-
-                        const firstFieldTime =
-                            Object.values(newFields)[0]?.updatedAt || new Date().toISOString();
-
                         await this.localDb.putDocument(
                             collectionName,
-                            {
-                                id: change.docId,
-                                data: newData,
-                                _fields: newFields,
-                                updated_at: firstFieldTime,
-                                created_at: firstFieldTime,
-                                deleted_at: null,
-                                deleted_by: null,
-                            },
+                            documentFromChange(change, deviceId),
                             false,
                         );
                         continue;
@@ -1049,27 +1544,47 @@ export class GitHubSyncService {
                 }
             }
         }
+
+        return changelog.changes?.length ?? 0;
     }
 
     /**
      * Push an updated meta.json to GitHub.
+     *
+     * Reads go through the REST API on purpose: `meta.json` records blob SHAs,
+     * which raw responses cannot provide.
      */
     private async pushMetaUpdate(): Promise<void> {
         const collectionNames = this.localDb.getRegisteredCollections();
         const collections: Record<string, { version: number; sha: string }> = {};
 
         for (const name of collectionNames) {
-            const result = await this.api.fetchJsonFile(`collections/${name}.json`);
+            const result = await this.api.fetchJsonFile(`collections/${name}.json`, {
+                forceApi: true,
+            });
             collections[name] = {
-                version: (result?.content as any)?.version ?? 0,
+                version: (result?.content as CollectionFile | undefined)?.version ?? 0,
                 sha: result?.sha ?? '',
             };
+        }
+
+        // Count what is actually left rather than assuming zero: another device
+        // can push a changelog while this compaction runs, and recording 0 would
+        // hide that file from the next compaction check.
+        let changelogCount: number;
+        try {
+            changelogCount = (await this.api.listDirectory('changelog')).length;
+        } catch {
+            // Directory listing failed — fall back to the previously recorded
+            // count (a raw read) instead of silently resetting it.
+            const existing = await this.api.fetchJsonFile<MetaFile>('meta.json');
+            changelogCount = (existing?.content as MetaFile | undefined)?.changelogCount ?? 0;
         }
 
         const meta: MetaFile = {
             schemaVersion: await this.localDb.getSchemaVersion(),
             collections,
-            changelogCount: 0, // Just compacted
+            changelogCount,
         };
 
         await this.api.createOrUpdateFileWithRetry(
@@ -1093,11 +1608,6 @@ export class GitHubSyncService {
         }
     }
 
-    private setSyncing(value: boolean): void {
-        this.isSyncing = value;
-        this.emitStatus();
-    }
-
     private emitStatus(): void {
         try {
             this.config.onSyncStatusChange(this.getStatus());
@@ -1105,4 +1615,35 @@ export class GitHubSyncService {
             // Callback errors should not break sync
         }
     }
+}
+
+// ─── Module Helpers ────────────────────────────────────────────────────────
+
+/** Rebuild a document from a changelog entry (create or upserted update). */
+function documentFromChange(change: ChangelogEntry, deviceId: string): SyncedDocument {
+    const data: Record<string, unknown> = {};
+    const fields: Record<string, { updatedAt: string; device: string }> = {};
+
+    for (const [fieldName, fieldData] of Object.entries(change.fields || {})) {
+        data[fieldName] = fieldData.value;
+        fields[fieldName] = { updatedAt: fieldData.updatedAt, device: deviceId };
+    }
+
+    const firstFieldTime = Object.values(fields)[0]?.updatedAt || new Date().toISOString();
+
+    return {
+        id: change.docId,
+        data,
+        _fields: fields,
+        updated_at: firstFieldTime,
+        created_at: firstFieldTime,
+        deleted_at: null,
+        deleted_by: null,
+    };
+}
+
+/** Infer a MIME type from a file extension. */
+function guessMimeType(filePath: string): string {
+    const extension = filePath.split('.').pop()?.toLowerCase() || '';
+    return MIME_TYPES[extension] || 'application/octet-stream';
 }

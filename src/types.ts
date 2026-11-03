@@ -187,9 +187,13 @@ export interface SyncStatus {
     isSyncing: boolean;
     /** Whether the browser reports an active network connection */
     isOnline: boolean;
+    /** Whether `init()` completed successfully */
+    isInitialized: boolean;
+    /** ISO 8601 timestamp of the last completed pull/push — null if never synced */
+    lastSyncAt: string | null;
     /** Current sync cursor — null if never synced */
     cursor: SyncCursor | null;
-    /** This device's identifier */
+    /** This device's identifier — empty string before `init()` */
     deviceId: DeviceId;
     /** Number of local changelog entries waiting to be pushed */
     pendingChanges: number;
@@ -197,19 +201,124 @@ export interface SyncStatus {
     repoSizeKb: number | null;
     /** Remaining GitHub API rate limit — null if unknown */
     rateLimitRemaining: number | null;
+    /** ISO 8601 timestamp when the GitHub rate limit resets — null if unknown */
+    rateLimitResetAt: string | null;
+    /** Whether reads are currently served from raw.githubusercontent.com */
+    rawContentActive: boolean;
 }
 
 // ─── Pull Result ───────────────────────────────────────────────────────────
 
 /** Result type for a pull operation */
 export type PullResult =
-    | { type: 'full'; collections: Record<string, CollectionFile>; meta: MetaFile | null }
+    | {
+          type: 'full';
+          collections: Record<string, CollectionFile>;
+          meta: MetaFile | null;
+          /** Remote documents merged into the local database */
+          documentsMerged: number;
+          /** Changelog operations applied on top of the collection files */
+          changelogOps: number;
+          /** Number of GitHub REST API calls consumed by this pull */
+          apiCalls?: number;
+          /** Number of reads served by raw.githubusercontent.com (free of rate limit) */
+          rawReads?: number;
+      }
     | {
           type: 'incremental';
           collections: Record<string, CollectionFile>;
           changelogs: ChangelogFile[];
+          /** Remote documents merged into the local database */
+          documentsMerged: number;
+          /** Changelog operations applied */
+          changelogOps: number;
+          /** Number of GitHub REST API calls consumed by this pull */
+          apiCalls?: number;
+          /** Number of reads served by raw.githubusercontent.com (free of rate limit) */
+          rawReads?: number;
       }
     | { type: 'none' };
+
+/**
+ * Result type for {@link GitHubSyncService.sync} — the pull outcome plus how
+ * many local changelog entries were pushed.
+ *
+ * `pushed` is 0 when the sync was skipped because another operation was already
+ * running, or when this device had nothing pending.
+ */
+export type SyncResult = PullResult & { pushed: number };
+
+/** Result type for a push operation */
+export interface PushResult {
+    /** Number of local changelog entries that were uploaded */
+    pushed: number;
+    /** Remote changelog file that was written — null when nothing was pending */
+    changelogPath: string | null;
+    /** Whether compaction ran as part of this push */
+    compacted: boolean;
+    /** REST API calls consumed by this push (raw reads are not counted) */
+    apiCalls: number;
+    /** Reads served by raw.githubusercontent.com during this push */
+    rawReads: number;
+}
+
+/** Result type for a compaction run */
+export interface CompactionResult {
+    /** Changelog files that were merged and removed */
+    changelogsCompacted: number;
+    /** Collections that were rewritten */
+    collectionsWritten: string[];
+    /** Soft-deleted documents that were purged permanently */
+    purgedDeletes: number;
+    /** REST API calls consumed by this compaction */
+    apiCalls: number;
+}
+
+/** Rate limit / transport information for status UIs */
+export interface RateLimitInfo {
+    /** Remaining REST API calls in the current window — null if unknown */
+    remaining: number | null;
+    /** ISO 8601 timestamp when the window resets — null if unknown */
+    resetAt: string | null;
+    /** REST API calls performed by this service instance */
+    apiCalls: number;
+    /** Reads served by raw.githubusercontent.com (these were free) */
+    rawReads: number;
+    /** Raw reads that reported "file does not exist" (also free) */
+    rawMisses: number;
+    /** Raw reads that had to fall back to the REST API */
+    rawFallbacks: number;
+    /** Whether raw reads are enabled and usable right now */
+    rawContentActive: boolean;
+}
+
+/** Accepted payloads for {@link GitHubSyncService.uploadFile} */
+export type UploadableContent = string | Blob | ArrayBuffer | Uint8Array;
+
+// ─── Content Transport ─────────────────────────────────────────────────────
+
+/**
+ * Where the bytes of a file read came from.
+ *
+ * - `api` — GitHub REST API (`/repos/{owner}/{repo}/contents/{path}`).
+ *   Counts against the hourly rate limit but is always authoritative and
+ *   returns the blob SHA.
+ * - `raw` — `raw.githubusercontent.com`. Does **not** count against the REST
+ *   API rate limit, but is CDN-cached and cannot return a blob SHA.
+ */
+export type ContentSource = 'api' | 'raw';
+
+/** Per-call overrides for file reads. */
+export interface FetchFileOptions {
+    /**
+     * Bypass raw.githubusercontent.com and always use the REST API.
+     *
+     * Use this for write-critical reads (e.g. the collection file about to be
+     * rewritten by a compaction) where a CDN-cached copy could cause a lost
+     * update.
+     */
+    forceApi?: boolean;
+}
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -227,6 +336,32 @@ export interface GitHubSyncConfig {
     maxRetries?: number;
     /** Base delay in ms for exponential backoff — defaults to 1000 */
     retryBaseDelay?: number;
+    /**
+     * How long soft-deleted documents are kept before compaction purges them —
+     * defaults to 30 days. Purging too early can resurrect deleted documents on
+     * devices that have not synced in a while.
+     */
+    deleteRetentionMs?: number;
+    /** Per-request timeout in ms for raw content and REST calls — defaults to 30000 */
+    requestTimeoutMs?: number;
+    /**
+     * Read file contents from `raw.githubusercontent.com` instead of the REST API.
+     *
+     * Raw reads do **not** count against the GitHub REST rate limit
+     * (5,000 requests/hour authenticated, 60/hour anonymous), which is by far
+     * the scarcest resource when using a repository as a database. GitterSync
+     * appends a cache-busting query parameter and transparently falls back to
+     * the REST API whenever raw content is unavailable (private repo without a
+     * usable token, CORS block, non-200 response, invalid JSON).
+     *
+     * Defaults to `true`. Set to `false` if you need strict read-after-write
+     * consistency from the REST API for every read.
+     */
+    useRawContent?: boolean;
+    /** Raw content host — defaults to 'https://raw.githubusercontent.com' */
+    rawBaseUrl?: string;
+    /** Append a cache-busting query parameter to raw URLs — defaults to true */
+    rawCacheBust?: boolean;
     /** Callback for sync status changes — used by UI */
     onSyncStatusChange?: (status: SyncStatus) => void;
     /** Schema migration steps — run on pull when remote schemaVersion > local */

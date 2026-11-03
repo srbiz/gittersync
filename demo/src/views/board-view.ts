@@ -7,7 +7,15 @@ import { renderColumn } from '../components/column';
 import { renderSyncBar } from '../components/sync-bar';
 import { showHelpDialog } from '../components/help-dialog';
 
+/** Unsubscribe handle for the board's state listener — see renderBoard() */
+let unsubscribeBoard: (() => void) | null = null;
+
 export function renderBoard(container: HTMLElement): void {
+    // Re-rendering the board (e.g. after returning from setup) must not leave a
+    // second listener writing into detached DOM.
+    unsubscribeBoard?.();
+    unsubscribeBoard = null;
+
     container.innerHTML = '';
 
     // Top bar
@@ -27,6 +35,7 @@ export function renderBoard(container: HTMLElement): void {
                 <input type="checkbox" id="auto-sync" checked>
                 Auto
             </label>
+            <a href="todo/" class="btn-sm btn-secondary" title="Vue 3 + Pinia todo demo">✅ Todo demo</a>
             <a href="https://paypal.me/GovindBhumkarIN" target="_blank" class="sponsor-link" title="Support this project">♥ Sponsor</a>
         </div>
     `;
@@ -67,26 +76,24 @@ export function renderBoard(container: HTMLElement): void {
         });
     };
 
-    subscribe(renderColumns);
+    unsubscribeBoard = subscribe(renderColumns);
     renderColumns();
 
-    // Auto-sync toggle — defer the import
-    const observer = new MutationObserver(() => {
-        const autoSyncCheckbox = document.getElementById('auto-sync') as HTMLInputElement;
-        if (autoSyncCheckbox) {
-            observer.disconnect();
-            autoSyncCheckbox.addEventListener('change', () => {
-                const sync = getState().sync;
-                if (!sync) return;
-                if (autoSyncCheckbox.checked) {
-                    sync.startAutoSync(30000);
-                    showMessage('info', 'Auto-sync enabled (30s interval)');
-                } else {
-                    sync.stopAutoSync();
-                    showMessage('info', 'Auto-sync disabled');
-                }
-            });
-        }
-    });
-    observer.observe(container, { childList: true, subtree: true });
+    // Auto-sync toggle — the checkbox is part of the markup we just created, so
+    // it can be wired up directly (no observer needed).
+    const autoSyncCheckbox = topBar.querySelector<HTMLInputElement>('#auto-sync');
+    if (autoSyncCheckbox) {
+        autoSyncCheckbox.checked = getState().sync?.autoSyncRunning ?? true;
+        autoSyncCheckbox.addEventListener('change', () => {
+            const sync = getState().sync;
+            if (!sync) return;
+            if (autoSyncCheckbox.checked) {
+                sync.startAutoSync(30000);
+                showMessage('info', 'Auto-sync enabled (30s interval)');
+            } else {
+                sync.stopAutoSync();
+                showMessage('info', 'Auto-sync disabled');
+            }
+        });
+    }
 }

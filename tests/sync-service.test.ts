@@ -474,8 +474,9 @@ describe('GitHubSyncService — sync', () => {
                 }),
         );
 
-        // Start first sync (will hang)
+        // Start first sync (will hang inside the first fetchJsonFile call)
         const sync1 = service.sync();
+        await vi.waitFor(() => expect(mockApiFetchJsonFile).toHaveBeenCalled());
 
         // Second sync should return 'none' immediately
         const sync2 = service.sync();

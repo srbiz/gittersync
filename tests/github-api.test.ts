@@ -45,6 +45,9 @@ function createAdapter(overrides: Partial<GitHubSyncConfig> = {}): GitHubApiAdap
         owner: 'testuser',
         repo: 'test-repo',
         branch: 'main',
+        // This suite exercises the REST path; raw reads have their own suite
+        // (tests/raw-content.test.ts) with a stubbed global fetch.
+        useRawContent: false,
         ...overrides,
     });
 }
@@ -387,11 +390,15 @@ describe('GitHubApiAdapter — compareCommits', () => {
         mockReposCompareCommits.mockResolvedValue({
             data: {
                 status: 'ahead',
+                ahead_by: 2,
+                behind_by: 0,
                 files: [
                     { filename: 'collections/users.json' },
                     { filename: 'changelog/2026-07-27_deviceA.json' },
                 ],
-                merge_base_commit: { sha: 'new-head-sha' },
+                merge_base_commit: { sha: 'base-sha' },
+                // oldest → newest; the last entry is the branch head
+                commits: [{ sha: 'mid-sha' }, { sha: 'new-head-sha' }],
             },
         });
 
@@ -402,7 +409,38 @@ describe('GitHubApiAdapter — compareCommits', () => {
             'collections/users.json',
             'changelog/2026-07-27_deviceA.json',
         ]);
+        // Resolved from the compare payload — no extra listCommits request needed
         expect(result.headSha).toBe('new-head-sha');
+        expect(result.aheadBy).toBe(2);
+        expect(mockReposListCommits).not.toHaveBeenCalled();
+    });
+
+    it('reports an unknown head when the compare payload carries no commits', async () => {
+        mockReposCompareCommits.mockResolvedValue({
+            data: { status: 'ahead', files: [], merge_base_commit: { sha: 'base-sha' } },
+        });
+
+        const result = await adapter.compareCommits('base-sha');
+
+        expect(result.status).toBe('ahead');
+        expect(result.headSha).toBe('');
+    });
+
+    it('falls back to diverged when GitHub truncates the comparison', async () => {
+        // 300 files is the truncation limit — acting on it would silently skip
+        // the changes that did not fit.
+        const files = Array.from({ length: 300 }, (_, i) => ({
+            filename: `collections/c${i}.json`,
+        }));
+        mockReposCompareCommits.mockResolvedValue({
+            data: { status: 'ahead', ahead_by: 400, files, commits: [{ sha: 'head-sha' }] },
+        });
+
+        const result = await adapter.compareCommits('base-sha');
+
+        expect(result.status).toBe('diverged');
+        expect(result.changedFiles).toEqual([]);
+        expect(result.aheadBy).toBe(400);
     });
 
     it('returns diverged on 404 (base SHA not found)', async () => {
@@ -429,6 +467,7 @@ describe('GitHubApiAdapter — compareCommits', () => {
 
         expect(result.status).toBe('identical');
         expect(result.changedFiles).toEqual([]);
+        expect(result.headSha).toBe('base-sha');
     });
 });
 

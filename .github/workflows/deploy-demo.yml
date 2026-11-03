@@ -5,6 +5,8 @@ on:
         branches: [main]
         paths:
             - 'demo/**'
+            - 'demo-vue/**'
+            - 'src/**'
             - '.github/workflows/deploy-demo.yml'
     workflow_dispatch:
 
@@ -36,13 +38,32 @@ jobs:
             - name: Build library
               run: npm run build
 
-            - name: Install demo dependencies
+            - name: Install kanban demo dependencies
               working-directory: ./demo
               run: npm ci
 
-            - name: Build demo
+            - name: Build kanban demo
               working-directory: ./demo
               run: npm run build
+
+            - name: Install todo demo dependencies
+              working-directory: ./demo-vue
+              run: npm ci
+
+            - name: Build todo demo
+              working-directory: ./demo-vue
+              run: npm run build
+
+            # Both demos ship as one Pages site:
+            #   /gittersync/       → kanban (vanilla TypeScript)
+            #   /gittersync/todo/  → todo (Vue 3 + Pinia)
+            # demo-vue is built with base '/gittersync/todo/', so nesting it
+            # under the kanban output needs no rewriting.
+            - name: Merge demos into one site
+              run: |
+                  mkdir -p demo/dist/todo
+                  cp -r demo-vue/dist/. demo/dist/todo/
+                  touch demo/dist/.nojekyll
 
             - name: Upload artifact
               uses: actions/upload-pages-artifact@v3

@@ -1,0 +1,30 @@
+{
+    "name": "gittersync-todo-vue",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Minimal Vue 3 + Vite + Pinia todo app backed by GitterSync (GitHub as a database)",
+    "scripts": {
+        "dev": "vite",
+        "build": "vue-tsc --noEmit && vite build",
+        "preview": "vite preview",
+        "typecheck": "vue-tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "gittersync": "file:..",
+        "pinia": "^3.0.3",
+        "vue": "^3.5.22"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-vue": "^6.0.1",
+        "@vue/test-utils": "^2.4.6",
+        "fake-indexeddb": "^6.2.5",
+        "jsdom": "^29.1.1",
+        "typescript": "~5.9.3",
+        "vite": "^6.3.5",
+        "vitest": "^3.2.7",
+        "vue-tsc": "^3.1.0"
+    }
+}
