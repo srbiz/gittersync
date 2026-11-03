@@ -8,7 +8,7 @@
  */
 
 import { setState, showMessage } from '../state';
-import { loadSavedConfig, saveConfig, getDefaultConfig, initializeSync } from '../gittersync-adapter';
+import { loadSavedConfig, saveConfig, getDefaultConfig, initializeSync, rememberPassphrase } from '../gittersync-adapter';
 import { hasStoredToken, retrieveToken, storeToken, clearStoredToken } from 'gittersync';
 import { showHelpDialog } from '../components/help-dialog';
 
@@ -137,6 +137,10 @@ export function renderSetupView(container: HTMLElement): void {
 
             if (encrypt && config.passphrase) {
                 await storeToken(token, config.passphrase);
+                // Lets a reload reconnect without re-typing the token
+                rememberPassphrase(config.passphrase);
+            } else {
+                rememberPassphrase('');
             }
 
             setState({ view: 'loading' });

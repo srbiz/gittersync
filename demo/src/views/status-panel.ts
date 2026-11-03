@@ -3,7 +3,7 @@
  */
 
 import { getState, subscribe, showMessage } from '../state';
-import { pushChanges, pullChanges, fullSync, compact, getFullStatus, exportData, importData } from '../gittersync-adapter';
+import { pushChanges, pullChanges, fullSync, compact, getFullStatus, exportData, importData, disconnect } from '../gittersync-adapter';
 import { showHelpDialog } from '../components/help-dialog';
 
 /** How many reads avoided the REST API since the page loaded. */
@@ -96,6 +96,8 @@ export function showStatusPanel(): void {
                 <button class="btn-sm btn-secondary" data-action="export">📦 Export</button>
                 <button class="btn-sm btn-secondary" data-action="import">📂 Import</button>
                 <button class="btn-sm btn-secondary" data-action="refresh">🔄 Refresh Status</button>
+                <button class="btn-sm btn-danger" data-action="disconnect"
+                        title="Stop syncing and remove the encrypted token from this browser">🔌 Disconnect</button>
             </div>
             <input type="file" id="import-file-input" accept=".zip" style="display:none">
             <p style="text-align:center;margin-top:1rem;color:var(--text-muted);font-size:0.75rem">
@@ -151,6 +153,13 @@ export function showStatusPanel(): void {
         panel.querySelector('[data-action="refresh"]')?.addEventListener('click', async () => {
             await getFullStatus();
             showMessage('info', 'Status refreshed');
+        });
+
+        panel.querySelector('[data-action="disconnect"]')?.addEventListener('click', async () => {
+            if (!window.confirm('Disconnect this device? The encrypted token is removed from this browser.')) return;
+            closeStatusPanel();
+            await disconnect();
+            showMessage('info', 'Disconnected — local data is kept until you clear the browser storage.');
         });
     };
 

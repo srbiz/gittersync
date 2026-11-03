@@ -12,6 +12,12 @@ import type { Task, Column, ColumnId, Priority, Label, TaskAttachment } from './
 import { setState, getState, getDefaultColumns, showMessage } from './state';
 
 const CONFIG_KEY = 'gittersync_demo_config';
+/**
+ * The passphrase lives in sessionStorage — this tab only — so a reload can
+ * unlock the encrypted token without the secret ever being written to disk.
+ * Close the tab and the stored blob becomes undecryptable again.
+ */
+const PASSPHRASE_KEY = 'gittersync_demo_passphrase';
 const DEFAULT_REPO_OWNER = 'srbiz';
 const DEFAULT_REPO_NAME = 'gittersync-demo-data';
 
@@ -39,6 +45,15 @@ export function getDefaultConfig(): AppConfig {
         branch: 'main',
         passphrase: '',
     };
+}
+
+export function rememberPassphrase(passphrase: string): void {
+    if (passphrase) sessionStorage.setItem(PASSPHRASE_KEY, passphrase);
+    else sessionStorage.removeItem(PASSPHRASE_KEY);
+}
+
+export function rememberedPassphrase(): string | null {
+    return sessionStorage.getItem(PASSPHRASE_KEY);
 }
 
 let syncService: GitHubSyncService | null = null;
@@ -89,7 +104,7 @@ export async function initializeSync(config: AppConfig, token: string): Promise<
     }
 
     // Pull initial data
-    const result = await syncService.pull();
+    await syncService.pull();
 
     // Load data into state
     await loadFromLocalDb();
@@ -98,6 +113,46 @@ export async function initializeSync(config: AppConfig, token: string): Promise<
     syncService.startAutoSync(30000); // every 30s
 
     setState({ sync: syncService, view: 'board', config });
+}
+
+/**
+ * Reconnect after a reload using the encrypted token plus this tab's passphrase.
+ *
+ * @returns false when reconnecting is not possible (nothing stored, no
+ * passphrase remembered, or the passphrase does not decrypt the token)
+ */
+export async function tryReconnect(): Promise<boolean> {
+    const config = loadSavedConfig();
+    const passphrase = rememberedPassphrase();
+    if (!config?.owner || !config.repo || !passphrase || !hasStoredToken()) return false;
+
+    const token = await retrieveToken(passphrase);
+    if (!token) return false;
+
+    await initializeSync(config, token);
+    return true;
+}
+
+/** Forget this device: stop syncing, drop the encrypted token and the passphrase. */
+export async function disconnect(): Promise<void> {
+    const sync = syncService;
+    syncService = null;
+    if (sync) {
+        sync.stopAutoSync();
+        await sync.destroy().catch(() => undefined);
+    }
+    clearStoredToken();
+    rememberPassphrase('');
+    setState({
+        sync: null,
+        view: 'setup',
+        config: null,
+        columns: getDefaultColumns(),
+        pendingChanges: 0,
+        cursor: null,
+        lastSyncAt: null,
+        deviceId: null,
+    });
 }
 
 export async function setupDemoDataRepo(config: AppConfig, token: string): Promise<void> {

@@ -8,7 +8,7 @@
 import { getState, subscribe, setState, showMessage } from './state';
 import { renderSetupView } from './views/setup-view';
 import { renderBoard } from './views/board-view';
-import { loadSavedConfig } from './gittersync-adapter';
+import { loadSavedConfig, rememberedPassphrase, tryReconnect } from './gittersync-adapter';
 import { hasStoredToken } from 'gittersync';
 
 // Generate a unique ID for new documents
@@ -64,10 +64,16 @@ subscribe((state) => {
 async function bootstrap(): Promise<void> {
     const saved = loadSavedConfig();
 
-    if (saved && saved.owner && saved.repo && hasStoredToken()) {
-        // Show setup view — user completes the process
-        setState({ view: 'setup' });
-        return;
+    // A reload in the same tab can reconnect on its own: the encrypted token is
+    // in localStorage and the passphrase is in sessionStorage.
+    if (saved?.owner && saved.repo && hasStoredToken() && rememberedPassphrase()) {
+        setState({ view: 'loading' });
+        try {
+            if (await tryReconnect()) return; // initializeSync switches to 'board'
+            showMessage('info', 'Stored token could not be unlocked — enter your passphrase to continue.');
+        } catch (err) {
+            showMessage('error', `Reconnect failed: ${(err as Error).message}`);
+        }
     }
 
     setState({ view: 'setup' });
