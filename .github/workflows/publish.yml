@@ -29,6 +29,9 @@ jobs:
             - name: Build
               run: npm run build
 
+            - name: Test built package under Node ESM
+              run: npm run test:package
+
             - name: Test
               run: npm test
 
