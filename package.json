@@ -1,6 +1,6 @@
 {
   "name": "gittersync",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "GitHub as a free database backend — offline-first sync with per-collection files, incremental changelogs, and field-level conflict resolution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,6 +21,10 @@
     "docs"
   ],
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/srbiz/gittersync.git"
@@ -31,6 +35,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "test": "vitest run --exclude tests/integration",
     "test:watch": "vitest --exclude tests/integration",
     "test:coverage": "vitest run --coverage --exclude tests/integration",
