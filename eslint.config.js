@@ -43,4 +43,14 @@ export default [
             'no-console': 'off',
         },
     },
+    {
+        // Node scripts (e.g. tests/package-smoke.mjs) — plain ESM, no parser needed
+        files: ['tests/**/*.mjs'],
+        languageOptions: {
+            globals: {
+                console: 'readonly',
+                process: 'readonly',
+            },
+        },
+    },
 ]

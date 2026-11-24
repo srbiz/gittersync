@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Node.js ESM loading of the published package
+  ([#3](https://github.com/srbiz/gittersync/issues/3)): the root
+  `tsconfig.json` now uses `module`/`moduleResolution: "NodeNext"`, so `tsc`
+  rejects extensionless relative imports (TS2835) instead of emitting them
+  into `dist/`, where Node's ESM loader cannot resolve them
+  (`ERR_MODULE_NOT_FOUND`). `tests/package-smoke.mjs` now also asserts that
+  every relative specifier in `src`, `dist/*.js` and `dist/*.d.ts` carries
+  an explicit `.js` extension, and the publish workflow runs
+  `npm run test:package` before publishing.
+- `src/local-db.ts` imports `{ Dexie }` as a named import from `dexie`
+  instead of the default import, which Dexie's types do not support under
+  `NodeNext` (TS2507) — this also fixes strict TypeScript consumers
+  (`skipLibCheck: false`) type-checking `dist/local-db.d.ts`.
+
 ## [1.5.0]
 
 The "spend fewer GitHub requests, document everything, and make the demos

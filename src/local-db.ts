@@ -27,7 +27,7 @@
  *    remaining tables unreachable.
  */
 
-import Dexie, { type Table } from 'dexie';
+import { Dexie, type Table } from 'dexie';
 import type { ChangelogEntry, SyncCursor, DeviceId, SyncedDocument, FieldsMap } from './types.js';
 import { ValidationError } from './types.js';
 import { assertValidCollectionName } from './config.js';

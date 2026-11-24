@@ -43,7 +43,7 @@
     "typecheck": "tsc --noEmit",
     "test:demos": "npm --prefix demo-vue test",
     "build:demos": "npm --prefix demo run build && npm --prefix demo-vue run build",
-    "prepublishOnly": "npm run build && npm test && npm run lint"
+    "prepublishOnly": "npm run test:package && npm test && npm run lint"
   },
   "keywords": [
     "github",
