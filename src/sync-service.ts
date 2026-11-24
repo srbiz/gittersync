@@ -14,9 +14,9 @@
  */
 
 import JSZip from 'jszip';
-import { GitHubApiAdapter, type ApiUsage as ApiUsageSnapshot } from './github-api';
-import { LocalDB } from './local-db';
-import { mergeDocument, applyChangelogToCollection, getExpiredDeletes } from './merge';
+import { GitHubApiAdapter, type ApiUsage as ApiUsageSnapshot } from './github-api.js';
+import { LocalDB } from './local-db.js';
+import { mergeDocument, applyChangelogToCollection, getExpiredDeletes } from './merge.js';
 import type {
     GitHubSyncConfig,
     SyncStatus,
@@ -35,16 +35,16 @@ import type {
     UploadableContent,
     FileRef,
     FetchFileOptions,
-} from './types';
-import { ConflictError, RateLimitError, ValidationError } from './types';
+} from './types.js';
+import { ConflictError, RateLimitError, ValidationError } from './types.js';
 import {
     resolveConfig,
     assertValidCollectionName,
     assertValidRepoPath,
     DEFAULT_AUTO_SYNC_INTERVAL_MS,
     type ResolvedGitHubSyncConfig,
-} from './config';
-import { LIBRARY_VERSION } from './version';
+} from './config.js';
+import { LIBRARY_VERSION } from './version.js';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 

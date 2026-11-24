@@ -16,11 +16,11 @@
  */
 
 import { Octokit } from '@octokit/rest';
-import type { GitHubSyncConfig, ContentSource, FetchFileOptions } from './types';
-import { ConflictError, RateLimitError, AuthError, ValidationError } from './types';
-import { resolveConfig, type ResolvedGitHubSyncConfig } from './config';
-import { assertValidRepoPath, MAX_CONTENT_API_BYTES } from './config';
-import { RawContentClient, type RawContentStats } from './raw-content';
+import type { GitHubSyncConfig, ContentSource, FetchFileOptions } from './types.js';
+import { ConflictError, RateLimitError, AuthError, ValidationError } from './types.js';
+import { resolveConfig, type ResolvedGitHubSyncConfig } from './config.js';
+import { assertValidRepoPath, MAX_CONTENT_API_BYTES } from './config.js';
+import { RawContentClient, type RawContentStats } from './raw-content.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 

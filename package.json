@@ -35,6 +35,7 @@
     "test:watch": "vitest --exclude tests/integration",
     "test:coverage": "vitest run --coverage --exclude tests/integration",
     "test:integration": "vitest run --config vitest.config.integration.ts",
+    "test:package": "npm run build && node tests/package-smoke.mjs",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
