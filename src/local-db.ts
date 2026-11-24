@@ -28,10 +28,10 @@
  */
 
 import Dexie, { type Table } from 'dexie';
-import type { ChangelogEntry, SyncCursor, DeviceId, SyncedDocument, FieldsMap } from './types';
-import { ValidationError } from './types';
-import { assertValidCollectionName } from './config';
-import { createDocument as buildDocument } from './merge';
+import type { ChangelogEntry, SyncCursor, DeviceId, SyncedDocument, FieldsMap } from './types.js';
+import { ValidationError } from './types.js';
+import { assertValidCollectionName } from './config.js';
+import { createDocument as buildDocument } from './merge.js';
 
 // ─── Database Schema ──────────────────────────────────────────────────────
 

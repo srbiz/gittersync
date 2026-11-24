@@ -46,12 +46,12 @@ export type {
     ContentSource,
     FetchFileOptions,
     GitHubSyncConfig,
-} from './types';
+} from './types.js';
 
-export { ConflictError, RateLimitError, AuthError, ValidationError } from './types';
+export { ConflictError, RateLimitError, AuthError, ValidationError } from './types.js';
 
 // Version
-export { LIBRARY_VERSION } from './version';
+export { LIBRARY_VERSION } from './version.js';
 
 // Configuration defaults & validation
 export {
@@ -68,12 +68,12 @@ export {
     DEFAULT_RAW_BASE_URL,
     DEFAULT_AUTO_SYNC_INTERVAL_MS,
     MAX_CONTENT_API_BYTES,
-} from './config';
-export type { ResolvedGitHubSyncConfig } from './config';
+} from './config.js';
+export type { ResolvedGitHubSyncConfig } from './config.js';
 
 // Raw content transport (raw.githubusercontent.com)
-export { RawContentClient } from './raw-content';
-export type { RawContentConfig, RawContentStats, RawFetchOutcome } from './raw-content';
+export { RawContentClient } from './raw-content.js';
+export type { RawContentConfig, RawContentStats, RawFetchOutcome } from './raw-content.js';
 
 // Merge algorithms
 export {
@@ -83,15 +83,15 @@ export {
     createDocument,
     createChangelogEntry,
     getExpiredDeletes,
-} from './merge';
+} from './merge.js';
 
 // GitHub API adapter
-export { GitHubApiAdapter, utf8ToBase64, decodeBase64Utf8 } from './github-api';
-export type { GitHubFileResult, CompareResult, WriteResult, ApiUsage } from './github-api';
+export { GitHubApiAdapter, utf8ToBase64, decodeBase64Utf8 } from './github-api.js';
+export type { GitHubFileResult, CompareResult, WriteResult, ApiUsage } from './github-api.js';
 
 // Local database
-export { LocalDB, META_DB_NAME, COLLECTIONS_DB_NAME } from './local-db';
-export type { LocalChangelogEntry, SyncMeta } from './local-db';
+export { LocalDB, META_DB_NAME, COLLECTIONS_DB_NAME } from './local-db.js';
+export type { LocalChangelogEntry, SyncMeta } from './local-db.js';
 
 // Crypto / token security
 export {
@@ -101,8 +101,8 @@ export {
     retrieveToken,
     hasStoredToken,
     clearStoredToken,
-} from './crypto';
-export type { EncryptedToken } from './crypto';
+} from './crypto.js';
+export type { EncryptedToken } from './crypto.js';
 
 // Main sync service
-export { GitHubSyncService } from './sync-service';
+export { GitHubSyncService } from './sync-service.js';

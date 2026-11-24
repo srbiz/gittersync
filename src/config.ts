@@ -7,8 +7,8 @@
  * collection names and paths.
  */
 
-import type { GitHubSyncConfig, MigrationStep, SyncStatus } from './types';
-import { ValidationError } from './types';
+import type { GitHubSyncConfig, MigrationStep, SyncStatus } from './types.js';
+import { ValidationError } from './types.js';
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
 

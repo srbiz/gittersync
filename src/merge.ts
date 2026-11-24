@@ -5,7 +5,7 @@
  * Handles soft deletes with separate `deleted_at` tracking.
  */
 
-import type { SyncedDocument, FieldsMap, ChangelogEntry, CollectionFile } from './types';
+import type { SyncedDocument, FieldsMap, ChangelogEntry, CollectionFile } from './types.js';
 
 // ─── Document-Level Merge ──────────────────────────────────────────────────
 
