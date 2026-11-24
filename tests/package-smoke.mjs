@@ -66,7 +66,7 @@ function* walk(dir) {
 }
 
 const filesToCheck = [
-    ...walk(join(root, 'src')).filter((file) => file.endsWith('.ts')),
+    ...[...walk(join(root, 'src'))].filter((file) => file.endsWith('.ts')),
     ...readdirSync(distDir)
         .filter((file) => file.endsWith('.js') || file.endsWith('.d.ts'))
         .map((file) => join(distDir, file)),
